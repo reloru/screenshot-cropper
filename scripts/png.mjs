@@ -140,6 +140,31 @@ export function makeImage({
   return { data, width, height };
 }
 
+/**
+ * Build an image from a stack of horizontal bands. Each band is
+ * [heightInRows, (x, yWithinBand) => [r,g,b,a]], which makes gradients,
+ * headers, and layered bars easy to express.
+ */
+export function rows(width, bands) {
+  const height = bands.reduce((n, [h]) => n + h, 0);
+  const data = new Uint8ClampedArray(width * height * 4);
+  let y0 = 0;
+  for (const [h, fn] of bands) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < width; x++) {
+        const o = ((y0 + y) * width + x) * 4;
+        const px = fn(x, y);
+        data[o] = px[0];
+        data[o + 1] = px[1];
+        data[o + 2] = px[2];
+        data[o + 3] = px[3] ?? 255;
+      }
+    }
+    y0 += h;
+  }
+  return { data, width, height };
+}
+
 /** Overwrite one pixel — for noise-budget tests. */
 export function setPixel(img, x, y, rgba) {
   const o = (y * img.width + x) * 4;

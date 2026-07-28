@@ -181,6 +181,57 @@ try {
     ? ok("the black bands are gone from the saved image")
     : bad(`top-left pixel is still band-coloured: rgb(${corner.join(",")})`);
 
+  // --- The real-world case: a noisy letterboxed photo on Auto ---------------
+  // Bars that are near-black with compression speckle and a soft ramp. Before
+  // the flat/drift/grace rewrite this measured 0 on the default setting.
+  await page.click("#reset");
+  await page.waitForFunction(() => document.getElementById("work").hidden, null, { timeout: 5000 });
+
+  const BAR = 180;
+  const lw = 700;
+  const lh = 1200;
+  const noisy = new Uint8ClampedArray(lw * lh * 4);
+  let seed = 11;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let y = 0; y < lh; y++) {
+    for (let x = 0; x < lw; x++) {
+      const o = (y * lw + x) * 4;
+      const inBar = y < BAR || y >= lh - BAR;
+      let v;
+      if (inBar) {
+        v = rnd() < 0.004 ? 8 + Math.round(rnd() * 34) : 0;
+        const d = Math.min(Math.abs(y - BAR), Math.abs(y - (lh - BAR)));
+        if (d < 14) v = Math.max(v, Math.round(((14 - d) / 14) * 26));
+      } else {
+        v = 60 + Math.round(rnd() * 180);
+      }
+      noisy[o] = v;
+      noisy[o + 1] = inBar ? v : Math.min(255, v + 40);
+      noisy[o + 2] = v;
+      noisy[o + 3] = 255;
+    }
+  }
+  await page.setInputFiles("#file", {
+    name: "letterboxed.png",
+    mimeType: "image/png",
+    buffer: encodePng({ data: noisy, width: lw, height: lh }),
+  });
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 20_000 });
+
+  const autoActive = await page.getAttribute('.tolerance button[data-tolerance="auto"]', "aria-checked");
+  eq(autoActive, "true", "Auto is the default strictness");
+
+  for (const side of ["top", "bottom"]) {
+    const got = Number(await page.inputValue(`#px-${side}`));
+    Math.abs(got - BAR) <= 3
+      ? ok(`noisy letterbox ${side} measured ${got}px (expected ~${BAR}) without touching strictness`)
+      : bad(`noisy letterbox ${side} measured ${got}px, expected ~${BAR}`);
+  }
+  for (const side of ["left", "right"]) {
+    const got = Number(await page.inputValue(`#px-${side}`));
+    eq(got, 0, `noisy letterbox has no ${side} void`);
+  }
+
   // Start over must clear everything.
   await page.click("#reset");
   await page.waitForFunction(
