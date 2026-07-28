@@ -5,7 +5,7 @@
 // this file, and the Content-Security-Policy the Worker sends (connect-src
 // 'none') means there could not be one.
 
-import { detectVoids, cropRect, DEFAULTS } from "./detect.js";
+import { detectVoids, detectVoidsAuto, cropRect } from "./detect.js";
 
 const SIDES = ["top", "bottom", "left", "right"];
 const LABELS = { top: "Top", bottom: "Bottom", left: "Left", right: "Right" };
@@ -42,7 +42,8 @@ const state = {
   detection: null,
   trim: { top: 0, bottom: 0, left: 0, right: 0 },
   use: { top: false, bottom: false, left: false, right: false },
-  tolerance: DEFAULTS.tolerance,
+  // "auto" sweeps tolerances and takes the stable answer; a number forces one.
+  tolerance: "auto",
   outFile: null,
   outUrl: null,
   buildId: 0,
@@ -180,7 +181,10 @@ async function loadFile(file) {
 }
 
 function measure() {
-  state.detection = detectVoids(state.imageData, { tolerance: state.tolerance });
+  state.detection =
+    state.tolerance === "auto"
+      ? detectVoidsAuto(state.imageData)
+      : detectVoids(state.imageData, { tolerance: state.tolerance });
   for (const side of SIDES) {
     state.trim[side] = state.detection[side];
     state.use[side] = state.detection[side] > 0;
@@ -287,9 +291,19 @@ function refresh() {
 
   if (det.blankImage) {
     showWarning("This image is blank edge to edge, so there's nothing to crop out of it.");
+  } else if (det.rotated) {
+    // Straightened photos have blank *triangles* in the corners, so no whole row
+    // or column is blank and there is no rectangle to trim. Four zeroes and
+    // "no blank edge" reads like a failure, so explain the actual shape.
+    showWarning(
+      "This looks like a straightened or rotated photo — the blank areas are triangles in the corners, " +
+        "not bands along the edges, so there's no rectangle to trim off. You can still type in your own numbers to crop it manually.",
+    );
   } else if (!det.hasVoid) {
     showWarning(
-      "No blank edges found at this strictness. Try <b>Loose</b> if the background is slightly shaded, or type the numbers yourself.",
+      state.tolerance === "auto"
+        ? "No blank edges found — this image looks like it already fills the frame. You can still type in your own numbers."
+        : "No blank edges found at this strictness. Switch back to <b>Auto</b>, or type the numbers yourself.",
     );
   } else if (state.width * state.height > MAX_PIXELS) {
     showWarning(
@@ -446,7 +460,8 @@ el.file.addEventListener("change", () => loadFile(el.file.files[0]));
 
 for (const button of el.tolerance) {
   button.addEventListener("click", () => {
-    state.tolerance = Number(button.dataset.tolerance);
+    const raw = button.dataset.tolerance;
+    state.tolerance = raw === "auto" ? "auto" : Number(raw);
     for (const other of el.tolerance) {
       other.setAttribute("aria-checked", String(other === button));
     }

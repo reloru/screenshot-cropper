@@ -27,24 +27,45 @@ That's enforced by the browser, not just promised here.
 
 ### Detection
 
-`public/detect.js` scans inward from each edge. A row or column counts as blank
-while every pixel matches the band's color within a tolerance — with a 0.5%
-noise budget, so one stray antialiased pixel doesn't reset a 1290px-wide row to
-zero. Fully transparent bands count as blank too.
+`public/detect.js` scans inward from each edge, counting blank lines. Every rule
+below exists because of a specific failure on a real phone screenshot — the
+naive version (match one color sampled at the edge, stop at the first line that
+disagrees) is wrong in three separate ways.
 
-Two details that matter in practice:
-
+- **A line's reference color is its own median**, not a color sampled once at
+  the edge, and not pixel 0 — on a noisy bar pixel 0 is frequently itself a
+  speckle, and then every other pixel "disagrees" with it and a solid black bar
+  reads as content.
+- **A line is blank if it is uniform in itself**, with a 2% noise budget. It is
+  not required to match the edge's color. That is what lets a **gradient
+  background** read as blank: each row of it is flat, even though the color at
+  the bottom is nothing like the color at the top.
+- **Drift is allowed, jumps are not.** The band's color may creep from line to
+  line (gradient → keeps going), but a jump larger than ~40 starts a new block.
+  So a 44px black status bar above a solid blue app header reports the black bar
+  only, and offers the header as a `+80 px more` chip. A colored header is never
+  swallowed silently.
+- **A failed line does not end the band — 18 consecutive failures do.** Bars in
+  a compressed photo are full of speckle, and stopping at the first bad line
+  meant a single dirty row inside a 180px bar measured the whole thing as `0`.
 - **Rows are measured first, then columns across only the surviving rows.** A
   black bar along the top otherwise makes every column start with black pixels,
   which hides real margins on the sides.
-- **Scanning stops at the first color change.** A 44px black status bar over a
-  60px white strip reports the black bar only — a solid-colored app header must
-  never be swallowed silently. The next band is offered as a `+60 px more` chip
-  you can tap.
 
-Strictness is adjustable: **Exact** (identical pixels only), **Normal**
-(tolerates recompression drift), **Loose** (tolerates a gently shaded
-background).
+**Auto** (the default) doesn't ask you to pick a tolerance. It sweeps ten of
+them per side and takes the *plateau* — the longest run of near-identical
+answers. A real edge is a huge discontinuity, so the measurement goes flat
+across a wide band of tolerances once it clears the noise floor, while a
+noise-limited measurement creeps upward with every step. Taking the flat part
+lands on the true edge. Each side sweeps independently, since one screenshot can
+have crisp black bars top and bottom and a soft gradient at the sides.
+
+Exact / Normal / Loose remain as manual overrides.
+
+**Straightened photos are out of scope by construction.** If you rotate a photo,
+the black fills the *corners* as triangles — no whole row or column is ever
+blank, so there is no rectangle to trim. The app detects that shape and says so
+rather than showing four zeroes that look like a bug.
 
 ## Develop
 

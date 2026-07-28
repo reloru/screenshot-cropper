@@ -1,9 +1,13 @@
 // Unit tests for the void measurement. Run: npm test
+//
+// The "real screenshot" group at the bottom reproduces failures found by testing
+// on an actual iPhone; each carries the wrong value it used to produce so a
+// regression is obvious.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { detectVoids, cropRect, colorName } from "../public/detect.js";
-import { makeImage, setPixel, encodePng, decodePng } from "../scripts/png.mjs";
+import { detectVoids, detectVoidsAuto, cropRect, colorName } from "../public/detect.js";
+import { makeImage, setPixel, encodePng, decodePng, rows } from "../scripts/png.mjs";
 
 const BLACK = [0, 0, 0, 255];
 const WHITE = [255, 255, 255, 255];
@@ -68,25 +72,28 @@ test("stops at a color change and reports the follow-on band", () => {
   assert.equal(r.sides.top.nextPx, 60, "white strip surfaced as an extension");
 });
 
-test("noise budget absorbs a few stray pixels but not a real edge", () => {
-  const img = makeImage({ width: 1000, height: 200, top: 50, band: WHITE });
-  // 4 off pixels in a 1000px row is 0.4% — under the 0.5% budget.
-  for (let x = 0; x < 4; x++) setPixel(img, x, 10, [12, 200, 30, 255]);
-  assert.equal(detectVoids(img).top, 50, "sub-budget speckle stays blank");
-
-  // 12 off pixels is 1.2% — over budget, so row 10 ends the band.
-  for (let x = 0; x < 12; x++) setPixel(img, x, 10, [12, 200, 30, 255]);
-  assert.equal(detectVoids(img).top, 10, "over-budget row ends the band");
+test("a solid app header under a status bar is never swallowed", () => {
+  // The drift rule allows a band's color to creep, so it must still refuse a
+  // jump — otherwise a colored header reads as more blank space.
+  const img = rows(600, [
+    [44, () => [8, 8, 8, 255]], // near-black status bar
+    [80, () => [20, 90, 200, 255]], // solid blue header
+    [300, (x) => [60 + ((x * 37) % 190), 90 + ((x * 17) % 160), 40 + ((x * 7) % 200), 255]],
+  ]);
+  const r = detectVoids(img);
+  assert.equal(r.top, 44, "stops at the header, does not eat it");
+  assert.equal(r.sides.top.nextPx, 80, "header offered as an extension instead");
 });
 
-test("tolerance controls how much drift still counts as blank", () => {
-  const img = makeImage({ width: 100, height: 100, top: 30, band: WHITE });
-  // Shade the first 10 rows slightly off-white, the way JPEG recompression does.
-  for (let y = 0; y < 10; y++) {
-    for (let x = 0; x < 100; x++) setPixel(img, x, y, [249, 249, 249, 255]);
-  }
-  assert.equal(detectVoids(img, { tolerance: 0 }).top, 10, "exact match splits the shades");
-  assert.equal(detectVoids(img, { tolerance: 8 }).top, 30, "normal tolerance merges them");
+test("noise budget absorbs stray pixels but not a real edge", () => {
+  const img = makeImage({ width: 1000, height: 200, top: 50, band: WHITE });
+  for (let x = 0; x < 15; x++) setPixel(img, x, 10, [12, 200, 30, 255]);
+  assert.equal(detectVoids(img).top, 50, "sub-budget speckle stays blank");
+
+  // Half the row disagreeing is content, not noise.
+  for (let x = 0; x < 500; x++) setPixel(img, x, 10, [12, 200, 30, 255]);
+  const r = detectVoids(img, { grace: 0 });
+  assert.equal(r.top, 10, "a genuinely non-uniform row ends the band");
 });
 
 test("a fully transparent border counts as a void", () => {
@@ -114,30 +121,11 @@ test("percentages and color metadata come back with each side", () => {
   assert.equal(r.sides.bottom.hex, null, "an absent void reports no color");
 });
 
-test("a vertical gradient terminates quickly and finds no void", () => {
-  // Every row here is uniform in itself but differs from its neighbour. The
-  // band scan must not recurse per row while looking for the next band.
-  const width = 64;
-  const height = 256;
-  const data = new Uint8ClampedArray(width * height * 4);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const o = (y * width + x) * 4;
-      data[o] = data[o + 1] = data[o + 2] = y;
-      data[o + 3] = 255;
-    }
-  }
-  const r = detectVoids({ data, width, height }, { tolerance: 0 });
-  assert.equal(r.top, 1);
-  assert.equal(r.sides.top.nextPx, 1);
-});
-
 test("cropRect clamps hand-entered overrides", () => {
   const img = { width: 100, height: 100 };
   assert.deepEqual(cropRect(img, { top: -5, bottom: 0, left: 0, right: 0 }), { x: 0, y: 0, width: 100, height: 100 });
-  const squashed = cropRect(img, { top: 90, bottom: 90, left: 0, right: 0 });
-  assert.ok(squashed.height >= 1, "overlapping trims still leave a pixel");
-  assert.deepEqual(cropRect(img, { top: 10.6, bottom: 0, left: 0, right: 0 }).y, 11, "fractional input rounds");
+  assert.ok(cropRect(img, { top: 90, bottom: 90, left: 0, right: 0 }).height >= 1);
+  assert.equal(cropRect(img, { top: 10.6, bottom: 0, left: 0, right: 0 }).y, 11, "fractional input rounds");
 });
 
 test("colorName only names neutral colors", () => {
@@ -155,4 +143,132 @@ test("the PNG fixture helper round-trips", () => {
   const r = detectVoids(decoded);
   assert.equal(r.top, 4);
   assert.equal(r.left, 3);
+});
+
+// --------------------------------------------------------------------------
+// Regressions from testing on a real iPhone. Each of these measured wrongly
+// before the flat/drift/grace rewrite.
+// --------------------------------------------------------------------------
+
+// A letterboxed photo: bars that are NEAR black, carrying compression speckle,
+// with a soft ramp where the bar meets the picture.
+function letterboxedPhoto({ width = 1290, height = 1876, bar = 180, speckleRate = 0.003, ramp = 14 } = {}) {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      const inBar = y < bar || y >= height - bar;
+      let v;
+      if (inBar) {
+        v = rnd() < speckleRate ? 8 + Math.round(rnd() * 34) : 0;
+        const d = Math.min(Math.abs(y - bar), Math.abs(y - (height - bar)));
+        if (d < ramp) v = Math.max(v, Math.round(((ramp - d) / ramp) * 26));
+      } else {
+        v = 60 + Math.round(rnd() * 180);
+      }
+      data[o] = v;
+      data[o + 1] = inBar ? v : Math.min(255, v + 40);
+      data[o + 2] = v;
+      data[o + 3] = 255;
+    }
+  }
+  return { data, width, height };
+}
+
+test("regression: speckled black bars no longer measure as zero", () => {
+  // Was: 0 at tolerance 0 and 8 (the reported "Bottom 0px" next to an obviously
+  // huge black bar), because one speckled row ended the scan outright.
+  const img = letterboxedPhoto();
+  for (const tolerance of [8, 24, 48]) {
+    const r = detectVoids(img, { tolerance });
+    assert.ok(
+      Math.abs(r.top - 180) <= 3 && Math.abs(r.bottom - 180) <= 3,
+      `tolerance ${tolerance} gave top=${r.top} bottom=${r.bottom}, expected ~180`,
+    );
+  }
+});
+
+test("regression: heavy speckle survives the scan", () => {
+  const r = detectVoidsAuto(letterboxedPhoto({ speckleRate: 0.03 }));
+  assert.ok(Math.abs(r.top - 180) <= 3, `top=${r.top}, expected ~180`);
+  assert.ok(Math.abs(r.bottom - 180) <= 3, `bottom=${r.bottom}, expected ~180`);
+});
+
+test("regression: a gradient background reads as blank", () => {
+  // The purple share-card screenshots reported "Bottom 29px" with a
+  // "+128 px more" chip: the band color drifts continuously, so a fixed
+  // tolerance anchored at the edge could never span it.
+  const img = rows(600, [
+    [200, (x, y) => { const v = 40 + Math.round(y * 0.35); return [v, v - 8, v + 20, 255]; }],
+    [300, (x) => [60 + ((x * 37) % 190), 90 + ((x * 17) % 160), 40 + ((x * 7) % 200), 255]],
+  ]);
+  const r = detectVoidsAuto(img);
+  assert.ok(Math.abs(r.top - 200) <= 3, `top=${r.top}, expected ~200 across the gradient`);
+});
+
+test("auto never invents a void", () => {
+  // The failure that would matter most: cropping away real picture.
+  const noBars = letterboxedPhoto({ bar: 0 });
+  const auto = detectVoidsAuto(noBars);
+  assert.equal(auto.top, 0);
+  assert.equal(auto.bottom, 0);
+  assert.equal(auto.hasVoid, false);
+
+  const busy = makeImage({ width: 300, height: 500 });
+  const r = detectVoidsAuto(busy);
+  assert.equal(r.hasVoid, false, "a full-bleed image is left alone");
+});
+
+test("auto handles white margins and thin bars", () => {
+  const white = detectVoidsAuto(makeImage({ width: 400, height: 600, top: 120, bottom: 120, band: WHITE }));
+  assert.equal(white.top, 120);
+  assert.equal(white.bottom, 120);
+
+  const thin = detectVoidsAuto(makeImage({ width: 400, height: 600, top: 12, band: BLACK }));
+  assert.ok(Math.abs(thin.top - 12) <= 2, `thin bar measured ${thin.top}, expected ~12`);
+});
+
+test("auto sweeps each side separately", () => {
+  // Crisp black bar on top, soft gradient at the bottom: one global tolerance
+  // cannot serve both, which is why the sweep is per-side.
+  const img = rows(500, [
+    [100, () => [0, 0, 0, 255]],
+    [300, (x) => [60 + ((x * 37) % 190), 90 + ((x * 17) % 160), 40 + ((x * 7) % 200), 255]],
+    [150, (x, y) => { const v = 200 - Math.round(y * 0.3); return [v, v, v, 255]; }],
+  ]);
+  const r = detectVoidsAuto(img);
+  assert.equal(r.top, 100, "crisp bar exact");
+  assert.ok(Math.abs(r.bottom - 150) <= 3, `gradient bottom=${r.bottom}, expected ~150`);
+});
+
+test("a straightened photo is identified rather than reported as nothing", () => {
+  // Black triangles in opposite corners: no full row or column is ever blank,
+  // so there is genuinely no rectangle to trim. Saying so beats four zeroes.
+  const width = 400;
+  const height = 400;
+  const data = new Uint8ClampedArray(width * height * 4);
+  let seed = 3;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      // Rotate ~20 degrees: outside the tilted rectangle is black.
+      const cx = x - width / 2;
+      const cy = y - height / 2;
+      const a = (20 * Math.PI) / 180;
+      const rx = Math.abs(cx * Math.cos(a) + cy * Math.sin(a));
+      const ry = Math.abs(-cx * Math.sin(a) + cy * Math.cos(a));
+      const inside = rx < width * 0.42 && ry < height * 0.42;
+      const v = inside ? 70 + Math.round(rnd() * 170) : 0;
+      data[o] = v;
+      data[o + 1] = inside ? Math.min(255, v + 30) : 0;
+      data[o + 2] = v;
+      data[o + 3] = 255;
+    }
+  }
+  const r = detectVoidsAuto({ data, width, height });
+  assert.equal(r.hasVoid, false, "correctly finds no straight edge to trim");
+  assert.equal(r.rotated, true, "and recognises why");
 });

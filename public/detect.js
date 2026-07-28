@@ -5,54 +5,54 @@
 //
 // This module is imported unchanged by the browser (public/app.js) and by the
 // Node test suite (test/detect.test.mjs), so what's tested is what ships.
+//
+// Real screenshots are messier than they look, and the rules below exist because
+// of specific failures on real phone screenshots — see README "Detection".
 
 export const DEFAULTS = {
   // Max per-channel difference (0-255) still counted as "the same color".
-  // 0 = exact match; 8 absorbs PNG-to-JPEG-and-back drift; 24 tolerates a
-  // gently shaded background.
-  tolerance: 8,
-  // Fraction of a line allowed to disagree with the band color before the line
-  // stops counting as blank. Without this, one stray antialiased pixel in a
-  // 1290px row would report a 0px void.
-  noiseBudget: 0.005,
+  tolerance: 12,
+  // Fraction of a line allowed to disagree with that line's own color before it
+  // stops counting as blank. Letterbox bars from a compressed photo are full of
+  // speckle; at 0.5% a bar with 0.3% speckle measured as ZERO blank pixels.
+  noiseBudget: 0.02,
+  // How many consecutive non-blank lines end the band. Scanning used to stop at
+  // the FIRST failure, so one speckled row inside a 180px black bar killed the
+  // whole measurement. Only sustained content ends a band now.
+  grace: 18,
+  // A jump this large in a line's own color starts a new block rather than
+  // continuing the band. Below it the band is allowed to drift, which is what
+  // lets a gradient background read as blank; above it a solid app header stays
+  // safe from being swallowed.
+  jump: 40,
 };
+
+// Tolerances tried by detectVoidsAuto(), lowest first.
+const AUTO_TOLERANCES = [0, 4, 8, 16, 24, 32, 40, 48, 64, 80];
 
 // A line (row or column) is described by a function i -> byte offset of pixel i
 // in the RGBA array, plus how many pixels it holds.
 
-// The band's reference color: the most common color on the outermost line.
-// Sampled rather than counted exhaustively — a band color is dominant by
-// definition, so ~512 samples find it and a 4K-wide row costs the same as a
-// phone-width one.
-function modalColor(data, offsetAt, length) {
+// The line's own representative color, taken as a median rather than a specific
+// pixel. Pixel 0 is a bad reference: on a noisy bar it is often itself a speckle,
+// and then every other pixel "disagrees" with it and the line reads as content.
+function lineColor(data, offsetAt, length) {
   if (length <= 0) return null;
-  const counts = new Map();
-  const step = Math.max(1, Math.floor(length / 512));
-  let bestKey = -1;
-  let bestCount = 0;
+  const step = Math.max(1, Math.floor(length / 128));
+  const sample = [];
   for (let i = 0; i < length; i += step) {
     const o = offsetAt(i);
-    // Pack RGBA into one number (< 2^32) so the Map keys stay primitives.
-    const key = data[o] * 16777216 + data[o + 1] * 65536 + data[o + 2] * 256 + data[o + 3];
-    const n = (counts.get(key) || 0) + 1;
-    counts.set(key, n);
-    if (n > bestCount) {
-      bestCount = n;
-      bestKey = key;
-    }
+    // Sort by luma so the median is the perceptually middle pixel, not the
+    // middle of one arbitrary channel.
+    sample.push([o, data[o] * 0.299 + data[o + 1] * 0.587 + data[o + 2] * 0.114]);
   }
-  if (bestKey < 0) return null;
-  // Recover the channels from the packed key rather than re-reading a pixel,
-  // since the modal pixel isn't necessarily pixel 0.
-  return {
-    r: Math.floor(bestKey / 16777216) % 256,
-    g: Math.floor(bestKey / 65536) % 256,
-    b: Math.floor(bestKey / 256) % 256,
-    a: bestKey % 256,
-  };
+  if (!sample.length) return null;
+  sample.sort((a, b) => a[1] - b[1]);
+  const o = sample[sample.length >> 1][0];
+  return { r: data[o], g: data[o + 1], b: data[o + 2], a: data[o + 3] };
 }
 
-// Does this pixel match the band color? A fully transparent reference is
+// Does this pixel match the line color? A fully transparent reference is
 // compared on alpha alone: RGB under alpha 0 is meaningless (canvas stores it
 // premultiplied, so it reads back as 0,0,0) and would otherwise fail the RGB
 // test against any other transparent pixel that started life a different color.
@@ -66,42 +66,70 @@ function pixelMatches(data, o, ref, tolerance) {
   );
 }
 
-function lineIsUniform(data, offsetAt, length, ref, tolerance, noiseBudget) {
+// Is this line uniform in itself? Note this asks nothing about the band's color
+// — only whether the line is all one shade. Comparing against a single color
+// sampled once at the edge is what made gradient backgrounds ratchet forward a
+// few pixels per tolerance step instead of being read as blank.
+function flatColor(data, offsetAt, length, tolerance, noiseBudget) {
+  const ref = lineColor(data, offsetAt, length);
+  if (!ref) return null;
   const allowed = Math.floor(length * noiseBudget);
   let bad = 0;
   for (let i = 0; i < length; i++) {
     if (!pixelMatches(data, offsetAt(i), ref, tolerance)) {
-      if (++bad > allowed) return false;
+      if (++bad > allowed) return null;
     }
   }
-  return true;
+  return ref;
 }
 
-// Count consecutive uniform lines starting at `start` and stepping by `step`
-// (+1 inward from the top/left edge, -1 inward from the bottom/right), up to
-// `limit` lines. `lineAt(index)` returns that line's offset function.
+function colorDistance(a, b) {
+  return Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b), Math.abs(a.a - b.a));
+}
+
+// Walk inward from an edge counting blank lines.
 //
-// Scanning stops at the first color change, so a black bar followed by a white
-// bar reports only the black one. That's deliberate: a solid-colored app header
-// sitting under a status bar must not be silently swallowed. The follow-on band
-// is reported separately as `nextPx` so the UI can offer to extend.
-// `wantNext` is false on the follow-on lookup so this recurses exactly one
-// level. Unbounded recursion would be a real hazard: in a vertical-gradient
-// wallpaper every single row is its own uniform band, which would otherwise
-// recurse once per row of image height.
-function scanBand(data, lineAt, lineLength, start, step, limit, tolerance, noiseBudget, wantNext = true) {
+// Two rules do the real work:
+//   drift vs jump — the band's color may creep (a gradient stays blank) but a
+//     sudden change means a new block, so a solid header under a status bar is
+//     reported separately instead of being eaten.
+//   grace window  — a line that fails does not end the band; only `grace`
+//     consecutive failures do. Speckle in a compressed black bar is survivable.
+function scanBand(data, lineAt, lineLength, start, step, limit, opts, wantNext = true) {
+  const { tolerance, noiseBudget, grace, jump } = opts;
   if (limit <= 0 || lineLength <= 0) return { px: 0, ref: null, nextPx: 0 };
-  const ref = modalColor(data, lineAt(start), lineLength);
-  if (!ref) return { px: 0, ref: null, nextPx: 0 };
-  let px = 0;
-  while (px < limit && lineIsUniform(data, lineAt(start + step * px), lineLength, ref, tolerance, noiseBudget)) {
-    px++;
+
+  let lastBlank = -1;
+  let firstRef = null;
+  let prevRef = null;
+  let stoppedOnJump = false;
+
+  for (let i = 0; i < limit; i++) {
+    const ref = flatColor(data, lineAt(start + step * i), lineLength, tolerance, noiseBudget);
+    if (ref && prevRef && colorDistance(ref, prevRef) > jump) {
+      stoppedOnJump = true;
+      break;
+    }
+    if (ref) {
+      if (!firstRef) firstRef = ref;
+      lastBlank = i;
+      prevRef = ref;
+    } else if (i - lastBlank > grace) {
+      break;
+    }
   }
+
+  const px = lastBlank + 1;
   let nextPx = 0;
-  if (wantNext && px > 0 && px < limit) {
-    nextPx = scanBand(data, lineAt, lineLength, start + step * px, step, limit - px, tolerance, noiseBudget, false).px;
+  // Only offer to extend when a color change is what stopped us — that is the
+  // "there is another solid band right there" case. If content stopped the scan
+  // there is nothing to extend into.
+  // `wantNext` is false on the follow-on lookup so this recurses exactly one
+  // level; a vertical-gradient image would otherwise recurse once per row.
+  if (wantNext && stoppedOnJump && px > 0 && px < limit) {
+    nextPx = scanBand(data, lineAt, lineLength, start + step * px, step, limit - px, opts, false).px;
   }
-  return { px, ref, nextPx };
+  return { px, ref: firstRef, nextPx };
 }
 
 function hexOf(ref) {
@@ -136,45 +164,71 @@ function sideInfo(band, total) {
   };
 }
 
+// Are the corners blank while the edges are not? That is a straightened photo:
+// the blank areas are triangles, so no full row or column is ever blank and
+// there is no rectangle to trim. Worth saying out loud rather than showing four
+// zeroes that read like a failure.
+function looksRotated(data, width, height, opts) {
+  const probe = Math.max(8, Math.round(Math.min(width, height) * 0.04));
+  let blankCorners = 0;
+  for (const [cx, cy] of [
+    [0, 0],
+    [width - probe, 0],
+    [0, height - probe],
+    [width - probe, height - probe],
+  ]) {
+    // A corner counts as blank when its whole probe square is one flat color.
+    const flat = flatColor(
+      data,
+      (i) => ((cy + Math.floor(i / probe)) * width + cx + (i % probe)) * 4,
+      probe * probe,
+      opts.tolerance,
+      opts.noiseBudget,
+    );
+    if (flat) blankCorners++;
+  }
+  return blankCorners >= 2;
+}
+
 /**
- * Measure the blank bands around the edges of an image.
+ * Measure the blank bands around the edges of an image at one tolerance.
  *
  * @param {{data: Uint8ClampedArray|Uint8Array, width: number, height: number}} image
  *        RGBA pixels, as returned by getImageData().
- * @param {{tolerance?: number, noiseBudget?: number}} [options]
- * @returns {{width, height, top, bottom, left, right, sides, crop, blankImage, hasVoid}}
+ * @param {{tolerance?, noiseBudget?, grace?, jump?}} [options]
+ * @returns {{width, height, top, bottom, left, right, sides, crop, blankImage, hasVoid, rotated}}
  */
 export function detectVoids(image, options = {}) {
   const { data, width, height } = image;
-  const tolerance = options.tolerance ?? DEFAULTS.tolerance;
-  const noiseBudget = options.noiseBudget ?? DEFAULTS.noiseBudget;
+  if (!width || !height) throw new Error("detectVoids: image has no dimensions");
 
-  if (!width || !height) {
-    throw new Error("detectVoids: image has no dimensions");
-  }
+  const opts = {
+    tolerance: options.tolerance ?? DEFAULTS.tolerance,
+    noiseBudget: options.noiseBudget ?? DEFAULTS.noiseBudget,
+    grace: options.grace ?? DEFAULTS.grace,
+    jump: options.jump ?? DEFAULTS.jump,
+  };
 
   // Rows first. Each row spans the full width.
   const rowLine = (y) => (x) => (y * width + x) * 4;
-  const topBand = scanBand(data, rowLine, width, 0, 1, height, tolerance, noiseBudget);
+  const topBand = scanBand(data, rowLine, width, 0, 1, height, opts);
   const top = topBand.px;
-  const bottomBand = scanBand(data, rowLine, width, height - 1, -1, height - top, tolerance, noiseBudget);
+  const bottomBand = scanBand(data, rowLine, width, height - 1, -1, height - top, opts);
   const bottom = bottomBand.px;
 
   // Columns second, and only across the rows that survived the trim above.
   // Order matters: a black status bar at the top makes every column start with
   // black pixels, which would drag the left/right band colors off and either
   // hide a real side void or invent one.
-  const innerTop = top;
   const innerHeight = height - top - bottom;
-  const colLine = (x) => (i) => ((innerTop + i) * width + x) * 4;
-  const leftBand = scanBand(data, colLine, innerHeight, 0, 1, width, tolerance, noiseBudget);
+  const colLine = (x) => (i) => ((top + i) * width + x) * 4;
+  const leftBand = scanBand(data, colLine, innerHeight, 0, 1, width, opts);
   const left = leftBand.px;
-  const rightBand = scanBand(data, colLine, innerHeight, width - 1, -1, width - left, tolerance, noiseBudget);
+  const rightBand = scanBand(data, colLine, innerHeight, width - 1, -1, width - left, opts);
   const right = rightBand.px;
 
-  // Nothing but blank: every row matched, or every surviving column did. Report
-  // it rather than handing back a zero-pixel crop.
   const blankImage = top >= height || innerHeight <= 0 || left >= width;
+  const hasVoid = top + bottom + left + right > 0;
 
   return {
     width,
@@ -191,8 +245,73 @@ export function detectVoids(image, options = {}) {
     },
     crop: cropRect({ width, height }, { top, bottom, left, right }),
     blankImage,
-    hasVoid: top + bottom + left + right > 0,
+    hasVoid,
+    // Only interesting when we found nothing — otherwise there IS a rectangle.
+    rotated: !hasVoid && !blankImage && looksRotated(data, width, height, opts),
+    tolerance: opts.tolerance,
   };
+}
+
+// The longest run of near-identical values, and the value it settles on.
+function plateau(values) {
+  let best = { length: 0, value: values[0] ?? 0, index: 0 };
+  let i = 0;
+  while (i < values.length) {
+    let j = i;
+    while (j + 1 < values.length && Math.abs(values[j + 1] - values[i]) <= 2) j++;
+    const length = j - i + 1;
+    // >= keeps the LAST equally-long run: at equal evidence prefer the higher
+    // tolerance, which is the one that got past the noise.
+    if (length >= best.length) best = { length, value: values[i], index: i };
+    i = j + 1;
+  }
+  return best;
+}
+
+/**
+ * Measure without being told a tolerance.
+ *
+ * Sweeps tolerances and takes the plateau — the longest run of near-identical
+ * answers. A real edge is a large discontinuity, so the measurement goes flat
+ * across a wide band of tolerances once the noise floor is cleared; a
+ * noise-limited measurement instead creeps upward with every step. Picking the
+ * flat part is what makes the letterboxed-photo and gradient cases work without
+ * anyone touching a strictness control.
+ *
+ * Each side is swept independently: a screenshot can have crisp black bars top
+ * and bottom and a soft gradient at the sides.
+ */
+export function detectVoidsAuto(image, options = {}) {
+  const runs = AUTO_TOLERANCES.map((tolerance) => detectVoids(image, { ...options, tolerance }));
+
+  const chosen = {};
+  for (const side of ["top", "bottom", "left", "right"]) {
+    const best = plateau(runs.map((r) => r[side]));
+    chosen[side] = best;
+  }
+
+  // Rebuild a full result from the per-side winners, taking each side's metadata
+  // from the run that produced it so the reported color matches the number.
+  const base = runs[runs.length - 1];
+  const result = {
+    width: base.width,
+    height: base.height,
+    sides: {},
+    blankImage: runs.every((r) => r.blankImage),
+    auto: true,
+  };
+  for (const side of ["top", "bottom", "left", "right"]) {
+    const source = runs[chosen[side].index];
+    result[side] = source[side];
+    result.sides[side] = source.sides[side];
+  }
+  result.hasVoid = result.top + result.bottom + result.left + result.right > 0;
+  result.crop = cropRect(
+    { width: result.width, height: result.height },
+    { top: result.top, bottom: result.bottom, left: result.left, right: result.right },
+  );
+  result.rotated = !result.hasVoid && !result.blankImage && runs.some((r) => r.rotated);
+  return result;
 }
 
 /**
