@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Screenshot Cropper — measure and trim the blank space</title>
+    <meta
+      name="description"
+      content="Measures the blank bands around a phone screenshot, tells you how big they are, and crops them off. Runs entirely in your browser — the image is never uploaded."
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#10141c" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main>
+      <header class="head">
+        <h1>Screenshot Cropper</h1>
+        <p class="tagline">
+          Finds the blank space around a screenshot, measures it, and trims it off.
+          <strong>Your image never leaves this device.</strong>
+        </p>
+      </header>
+
+      <noscript>
+        <p class="notice">This tool measures pixels in your browser, so it needs JavaScript enabled.</p>
+      </noscript>
+
+      <!-- Step 1: pick an image -->
+      <section id="pick" class="card drop-zone">
+        <label class="picker" for="file">
+          <svg class="picker-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M4 5h16v14H4z M4 16l5-5 3 3 3-3 5 5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linejoin="round"
+            />
+            <circle cx="9" cy="9.5" r="1.4" fill="currentColor" />
+          </svg>
+          <span class="picker-title">Choose a screenshot</span>
+          <span class="picker-sub">or drag one in, or paste from the clipboard</span>
+        </label>
+        <input type="file" id="file" accept="image/*" class="visually-hidden" />
+        <p id="pick-error" class="error" role="alert" hidden></p>
+      </section>
+
+      <!-- Step 2: measure, adjust, save -->
+      <section id="work" hidden>
+        <div class="card">
+          <div class="preview-wrap">
+            <canvas id="preview" aria-label="Preview of the screenshot with the blank areas highlighted"></canvas>
+            <div class="band band-top" data-side="top"><span></span></div>
+            <div class="band band-bottom" data-side="bottom"><span></span></div>
+            <div class="band band-left" data-side="left"><span></span></div>
+            <div class="band band-right" data-side="right"><span></span></div>
+          </div>
+          <p class="preview-caption">Shaded areas will be removed.</p>
+        </div>
+
+        <div class="card">
+          <div class="panel-head">
+            <h2>Blank space found</h2>
+            <div class="tolerance" role="radiogroup" aria-label="Detection strictness">
+              <button type="button" data-tolerance="0" role="radio" aria-checked="false">Exact</button>
+              <button type="button" data-tolerance="8" role="radio" aria-checked="true">Normal</button>
+              <button type="button" data-tolerance="24" role="radio" aria-checked="false">Loose</button>
+            </div>
+          </div>
+
+          <div id="sides" class="sides"></div>
+
+          <p id="summary" class="summary" role="status"></p>
+          <p id="warning" class="notice" hidden></p>
+        </div>
+
+        <div class="actions">
+          <button type="button" id="save" class="primary" disabled>Save</button>
+          <button type="button" id="reset">Start over</button>
+        </div>
+        <p id="save-hint" class="hint"></p>
+      </section>
+
+      <footer class="foot">
+        <p>
+          Everything happens on your device: the file is read, measured, and cropped in the page.
+          Nothing is uploaded, stored, or logged — this page cannot make network requests at all.
+        </p>
+      </footer>
+    </main>
+
+    <!-- One row per edge, cloned by app.js -->
+    <template id="side-row">
+      <div class="side-row">
+        <input type="checkbox" class="side-use" />
+        <label class="side-name"></label>
+        <span class="side-input">
+          <input type="number" class="side-px" min="0" step="1" inputmode="numeric" />
+          <span class="unit">px</span>
+        </span>
+        <span class="side-pct"></span>
+        <div class="side-meta">
+          <span class="side-swatch" aria-hidden="true"></span>
+          <span class="side-color"></span>
+          <button type="button" class="side-extend" hidden></button>
+        </div>
+      </div>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

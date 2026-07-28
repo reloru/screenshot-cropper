@@ -1,0 +1,18 @@
+{
+  "name": "Screenshot Cropper",
+  "short_name": "Cropper",
+  "description": "Measure the blank space around a screenshot and crop it off, entirely on your device.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#10141c",
+  "theme_color": "#10141c",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
