@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # No runtime dependencies, and the tests import only node builtins plus
+      # the app's own modules — so there is nothing to install.
+      - name: Measure-logic tests
+        run: node --test test/
+
+  build:
+    name: Build check (dry-run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      # Parses wrangler.jsonc and bundles the Worker without uploading, which
+      # catches config errors the tests can't see. No credentials needed.
+      - run: npx wrangler deploy --dry-run

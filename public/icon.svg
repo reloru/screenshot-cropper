@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Screenshot Cropper">
+  <rect width="512" height="512" rx="0" fill="#10141c" />
+  <!-- The screenshot, with its blank margins shown as the dashed band. -->
+  <rect x="136" y="88" width="240" height="336" rx="20" fill="#1e2533" stroke="#2b3446" stroke-width="8" />
+  <rect x="136" y="88" width="240" height="72" fill="#ff5a6e" opacity="0.32" />
+  <rect x="136" y="352" width="240" height="72" fill="#ff5a6e" opacity="0.32" />
+  <!-- The content that survives the crop. -->
+  <rect x="168" y="192" width="176" height="128" rx="10" fill="#5aa9ff" />
+  <circle cx="212" cy="230" r="16" fill="#10141c" opacity="0.55" />
+  <path d="M176 312l44-44 30 30 34-34 52 48v8H176z" fill="#10141c" opacity="0.45" />
+  <!-- Crop marks. -->
+  <g stroke="#e8ecf4" stroke-width="14" stroke-linecap="square" fill="none">
+    <path d="M104 168V136h32" />
+    <path d="M408 344v32h-32" />
+  </g>
+</svg>
