@@ -13,8 +13,8 @@ That's enforced by the browser, not just promised here.
 
 ## How it works
 
-1. **Pick an image** — tap the picker, or drag a file in, or paste from the
-   clipboard.
+1. **Pick images** — one or many. Tap the picker, drag files in, or paste from
+   the clipboard.
 2. **It measures the voids** — how many pixels of blank space sit on the top,
    bottom, left, and right, as pixels, as a percentage, and with the band's
    actual color.
@@ -23,7 +23,33 @@ That's enforced by the browser, not just promised here.
    Shaded overlays on the preview show exactly what's going.
 4. **Save** — opens the phone's native share sheet, where **Save Image** puts it
    in Photos and **Save to Files** puts it wherever you like. Browsers without
-   file sharing (most desktops) download the file instead.
+   file sharing (most desktops) download instead. **Copy** puts a single
+   cropped image straight on the clipboard.
+
+### Batch
+
+Pick more than one image and you get a list instead of the editor: each row
+shows the cropped thumbnail, the before → after size, and how much came off.
+Untick anything you don't want, then **Save all** — one share sheet with every
+file in it. **Adjust** opens any single image in the full editor and comes back.
+
+Images are processed one at a time and only the finished (compressed) result is
+kept in memory. Holding twenty decoded 4 MP screenshots would be ~320 MB of raw
+pixels and would kill a phone tab.
+
+### Formats
+
+**Auto** (default) matches each source. That is the honest choice, not a
+compromise: cropping only ever *drops* pixels, so a PNG screenshot comes out
+bit-for-bit identical, while a photo that is already JPEG gains nothing from
+being re-wrapped in PNG — it just gets several times larger. **PNG** and
+**JPEG** force the issue.
+
+One guard: JPEG has no alpha channel, so an image with transparent edges stays
+PNG even if you ask for JPEG, rather than silently filling those areas in.
+
+Clipboard copies are always PNG — it is the only bitmap type browsers reliably
+accept on write (Chrome rejects `image/jpeg` outright).
 
 ### Detection
 

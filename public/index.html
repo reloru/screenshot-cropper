@@ -29,7 +29,7 @@
         <p class="notice">This tool measures pixels in your browser, so it needs JavaScript enabled.</p>
       </noscript>
 
-      <!-- Step 1: pick an image -->
+      <!-- Step 1: pick images -->
       <section id="pick" class="card drop-zone">
         <label class="picker" for="file">
           <svg class="picker-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -42,15 +42,35 @@
             />
             <circle cx="9" cy="9.5" r="1.4" fill="currentColor" />
           </svg>
-          <span class="picker-title">Choose a screenshot</span>
-          <span class="picker-sub">or drag one in, or paste from the clipboard</span>
+          <span class="picker-title">Choose screenshots</span>
+          <span class="picker-sub">one or many — or drag them in, or paste</span>
         </label>
-        <input type="file" id="file" accept="image/*" class="visually-hidden" />
+        <input type="file" id="file" accept="image/*" multiple class="visually-hidden" />
         <p id="pick-error" class="error" role="alert" hidden></p>
       </section>
 
-      <!-- Step 2: measure, adjust, save -->
+      <!-- Batch progress -->
+      <section id="progress" class="card" hidden>
+        <p id="progress-text" role="status">Working…</p>
+        <div class="bar"><div id="progress-bar"></div></div>
+      </section>
+
+      <!-- Batch list (2+ images) -->
+      <section id="batch" hidden>
+        <div class="card">
+          <div class="panel-head">
+            <h2 id="batch-title">Cropped</h2>
+            <button type="button" id="batch-add" class="linkish">Add more</button>
+          </div>
+          <div id="batch-list" class="batch-list"></div>
+          <p id="batch-summary" class="summary" role="status"></p>
+        </div>
+      </section>
+
+      <!-- Single-image editor -->
       <section id="work" hidden>
+        <button type="button" id="back" class="linkish back" hidden>← Back to all images</button>
+
         <div class="card">
           <div class="preview-wrap">
             <canvas id="preview" aria-label="Preview of the screenshot with the blank areas highlighted"></canvas>
@@ -78,9 +98,25 @@
           <p id="summary" class="summary" role="status"></p>
           <p id="warning" class="notice" hidden></p>
         </div>
+      </section>
+
+      <!-- Output format + actions, shared by both modes -->
+      <section id="output" hidden>
+        <div class="card">
+          <div class="panel-head">
+            <h2>Save as</h2>
+            <div class="tolerance" role="radiogroup" aria-label="File format">
+              <button type="button" data-format="auto" role="radio" aria-checked="true">Auto</button>
+              <button type="button" data-format="png" role="radio" aria-checked="false">PNG</button>
+              <button type="button" data-format="jpeg" role="radio" aria-checked="false">JPEG</button>
+            </div>
+          </div>
+          <p id="format-note" class="format-note"></p>
+        </div>
 
         <div class="actions">
           <button type="button" id="save" class="primary" disabled>Save</button>
+          <button type="button" id="copy" hidden>Copy</button>
           <button type="button" id="reset">Start over</button>
         </div>
         <p id="save-hint" class="hint"></p>
@@ -88,7 +124,7 @@
 
       <footer class="foot">
         <p>
-          Everything happens on your device: the file is read, measured, and cropped in the page.
+          Everything happens on your device: files are read, measured, and cropped in the page.
           Nothing is uploaded, stored, or logged — this page cannot make network requests at all.
         </p>
       </footer>
@@ -109,6 +145,19 @@
           <span class="side-color"></span>
           <button type="button" class="side-extend" hidden></button>
         </div>
+      </div>
+    </template>
+
+    <!-- One row per image in batch mode -->
+    <template id="batch-row">
+      <div class="batch-row">
+        <input type="checkbox" class="batch-use" checked />
+        <img class="batch-thumb" alt="" />
+        <div class="batch-info">
+          <span class="batch-name"></span>
+          <span class="batch-dims"></span>
+        </div>
+        <button type="button" class="batch-tune">Adjust</button>
       </div>
     </template>
 
