@@ -232,6 +232,129 @@ try {
     eq(got, 0, `noisy letterbox has no ${side} void`);
   }
 
+  // --- Format selection ----------------------------------------------------
+  // A PNG source on Auto must stay PNG: cropping only drops pixels, so there is
+  // no reason to re-encode it lossily.
+  await page.click('[data-format="jpeg"]');
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 10_000 });
+  const [jpegDl] = await Promise.all([
+    page.waitForEvent("download", { timeout: 15_000 }),
+    page.click("#save"),
+  ]);
+  eq(jpegDl.suggestedFilename().endsWith(".jpg"), true, "JPEG format produces a .jpg file");
+
+  await page.click('[data-format="auto"]');
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 10_000 });
+  const [autoDl] = await Promise.all([
+    page.waitForEvent("download", { timeout: 15_000 }),
+    page.click("#save"),
+  ]);
+  eq(autoDl.suggestedFilename().endsWith(".png"), true, "Auto keeps a PNG source as PNG");
+
+  // --- Copy to clipboard ---------------------------------------------------
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const copyVisible = await page.isVisible("#copy");
+  copyVisible ? ok("Copy is offered for a single image") : bad("Copy button never appeared");
+  if (copyVisible) {
+    // Whatever image is loaded right now — read the expected size off the page
+    // rather than assuming, since earlier sections swap the fixture.
+    const shown = (await page.textContent("#summary")).match(/cropped\s+(\d+)\s*×\s*(\d+)/);
+    const want = shown ? { w: Number(shown[1]), h: Number(shown[2]) } : null;
+
+    await page.click("#copy");
+    await page.waitForFunction(
+      () => document.getElementById("save-hint").textContent.includes("Copied"),
+      null,
+      { timeout: 10_000 },
+    );
+    const copied = await page.evaluate(async () => {
+      const items = await navigator.clipboard.read();
+      const png = items.find((i) => i.types.includes("image/png"));
+      if (!png) return null;
+      const blob = await png.getType("image/png");
+      const bmp = await createImageBitmap(blob);
+      return { w: bmp.width, h: bmp.height, type: blob.type };
+    });
+    copied && want && copied.w === want.w && copied.h === want.h
+      ? ok(`clipboard holds the cropped image (${copied.w} × ${copied.h})`)
+      : bad(`clipboard image wrong: got ${JSON.stringify(copied)}, expected ${JSON.stringify(want)}`);
+    // Even with JPEG selected a moment ago, the clipboard copy must be PNG —
+    // it is the only bitmap type browsers reliably accept on write.
+    copied && copied.type === "image/png"
+      ? ok("clipboard copy is PNG regardless of the save format")
+      : bad(`clipboard type was ${copied && copied.type}`);
+  }
+
+  // --- Batch mode ----------------------------------------------------------
+  await page.click("#reset");
+  await page.waitForFunction(() => document.getElementById("pick").hidden === false, null, { timeout: 5000 });
+
+  const batchFixtures = [
+    { name: "one.png", spec: { width: 300, height: 400, top: 60, bottom: 40 } },
+    { name: "two.png", spec: { width: 300, height: 400, left: 25, right: 25 } },
+    { name: "three.png", spec: { width: 300, height: 400 } }, // nothing to trim
+  ];
+  await page.setInputFiles(
+    "#file",
+    batchFixtures.map((f) => ({
+      name: f.name,
+      mimeType: "image/png",
+      buffer: encodePng(makeImage(f.spec)),
+    })),
+  );
+  await page.waitForFunction(() => document.getElementById("batch").hidden === false, null, {
+    timeout: 20_000,
+  });
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 30_000 });
+  ok("three images processed into the batch list");
+
+  eq(await page.locator(".batch-row").count(), 3, "one row per image");
+  const saveLabel = await page.textContent("#save");
+  eq(saveLabel.trim(), "Save all 3", "Save button reflects the batch");
+  eq(await page.isVisible("#copy"), false, "Copy is hidden for a batch");
+
+  const rowText = await page.locator(".batch-row").nth(0).textContent();
+  rowText.includes("300×400")
+    ? ok("batch rows show original and cropped dimensions")
+    : bad(`batch row text unexpected: ${rowText}`);
+
+  // Excluding one image must drop it from the save set.
+  await page.locator(".batch-use").nth(2).uncheck();
+  await page.waitForFunction(
+    () => document.getElementById("save").textContent.includes("Save all 2"),
+    null,
+    { timeout: 10_000 },
+  );
+  ok("unchecking an image removes it from the save set");
+
+  // Downloads: two files, each cropped correctly.
+  const downloads = [];
+  page.on("download", (d) => downloads.push(d));
+  await page.click("#save");
+  const deadline = Date.now() + 20_000;
+  while (downloads.length < 2 && Date.now() < deadline) await sleep(250);
+  eq(downloads.length, 2, "batch save produced two files");
+  if (downloads.length >= 2) {
+    const sizes = [];
+    for (const d of downloads) {
+      const p = join(profile, d.suggestedFilename());
+      await d.saveAs(p);
+      const dec = decodePng(readFileSync(p));
+      sizes.push(`${dec.width}x${dec.height}`);
+    }
+    sizes.includes("300x300") && sizes.includes("250x400")
+      ? ok(`each batch file cropped independently (${sizes.join(", ")})`)
+      : bad(`batch crop sizes wrong: ${sizes.join(", ")}`);
+  }
+
+  // Adjusting one image from the batch and coming back.
+  await page.locator(".batch-tune").nth(0).click();
+  await page.waitForFunction(() => document.getElementById("work").hidden === false, null, { timeout: 10_000 });
+  eq(Number(await page.inputValue("#px-top")), 60, "Adjust opens that image's own measurements");
+  await page.click("#back");
+  await page.waitForFunction(() => document.getElementById("batch").hidden === false, null, { timeout: 10_000 });
+  ok("Back returns to the batch list");
+
   // Start over must clear everything.
   await page.click("#reset");
   await page.waitForFunction(

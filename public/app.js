@@ -1,55 +1,80 @@
 // Screenshot Cropper — UI wiring.
 //
 // The whole pipeline is local: File -> ImageBitmap -> canvas pixels ->
-// detectVoids() -> crop canvas -> Blob -> share sheet. There is no fetch() in
-// this file, and the Content-Security-Policy the Worker sends (connect-src
-// 'none') means there could not be one.
+// detectVoids() -> crop canvas -> Blob -> share sheet / clipboard. There is no
+// fetch() in this file, and the Content-Security-Policy the Worker sends
+// (connect-src 'none') means there could not be one.
+//
+// One image and many images run the same path: state.items always holds the
+// list, and a single item just opens straight into the editor.
 
 import { detectVoids, detectVoidsAuto, cropRect } from "./detect.js";
+import {
+  MAX_PIXELS,
+  canCopyImages,
+  canShareFiles,
+  copyImage,
+  decodeImage,
+  downloadFile,
+  encodeCrop,
+  formatBytes,
+  hasTransparency,
+  makeThumb,
+  outputName,
+  outputType,
+  readPixels,
+  releaseSource,
+  sourceSize,
+} from "./pipeline.js";
 
 const SIDES = ["top", "bottom", "left", "right"];
 const LABELS = { top: "Top", bottom: "Bottom", left: "Left", right: "Right" };
-// Safari on iOS refuses to read back canvases past roughly this area. Phone
-// screenshots are ~4 MP, so this only trips on large camera photos.
-const MAX_PIXELS = 16.7e6;
 
 const el = {
   pick: document.getElementById("pick"),
   file: document.getElementById("file"),
   pickError: document.getElementById("pick-error"),
+  progress: document.getElementById("progress"),
+  progressText: document.getElementById("progress-text"),
+  progressBar: document.getElementById("progress-bar"),
+  batch: document.getElementById("batch"),
+  batchTitle: document.getElementById("batch-title"),
+  batchList: document.getElementById("batch-list"),
+  batchSummary: document.getElementById("batch-summary"),
+  batchAdd: document.getElementById("batch-add"),
   work: document.getElementById("work"),
+  back: document.getElementById("back"),
   preview: document.getElementById("preview"),
   sides: document.getElementById("sides"),
   summary: document.getElementById("summary"),
   warning: document.getElementById("warning"),
+  output: document.getElementById("output"),
+  formatNote: document.getElementById("format-note"),
   save: document.getElementById("save"),
+  copy: document.getElementById("copy"),
   reset: document.getElementById("reset"),
   saveHint: document.getElementById("save-hint"),
   rowTemplate: document.getElementById("side-row"),
-  tolerance: document.querySelectorAll(".tolerance button"),
+  batchTemplate: document.getElementById("batch-row"),
+  tolerance: document.querySelectorAll("[data-tolerance]"),
+  format: document.querySelectorAll("[data-format]"),
   bands: {},
 };
-for (const side of SIDES) {
-  el.bands[side] = document.querySelector(`.band-${side}`);
-}
+for (const side of SIDES) el.bands[side] = document.querySelector(`.band-${side}`);
 
 const state = {
-  file: null,
-  source: null, // ImageBitmap (or HTMLImageElement on old Safari)
-  width: 0,
-  height: 0,
-  imageData: null, // kept so a strictness change re-measures without re-decoding
-  detection: null,
-  trim: { top: 0, bottom: 0, left: 0, right: 0 },
-  use: { top: false, bottom: false, left: false, right: false },
-  // "auto" sweeps tolerances and takes the stable answer; a number forces one.
+  items: [], // { file, name, width, height, detection, trim, use, outFile, thumbUrl, include, error }
+  editing: null, // index into items, or null when showing the batch list
+  open: null, // { source, imageData } for the item being edited
   tolerance: "auto",
-  outFile: null,
-  outUrl: null,
+  format: "auto",
   buildId: 0,
 };
 
-// ---------------------------------------------------------------- row widgets
+const isBatch = () => state.items.length > 1;
+const current = () => (state.editing === null ? null : state.items[state.editing]);
+
+// ---------------------------------------------------------------- side widgets
 
 const rows = {};
 for (const side of SIDES) {
@@ -71,21 +96,26 @@ for (const side of SIDES) {
   row.px.setAttribute("aria-label", `${LABELS[side]} trim in pixels`);
 
   row.use.addEventListener("change", () => {
-    state.use[side] = row.use.checked;
+    const item = current();
+    if (!item) return;
+    item.use[side] = row.use.checked;
     refresh();
   });
   row.px.addEventListener("input", () => {
+    const item = current();
+    if (!item) return;
     const n = Math.max(0, Math.round(Number(row.px.value) || 0));
-    state.trim[side] = n;
+    item.trim[side] = n;
     // Typing a number is intent to crop that side; typing zero is intent not to.
-    state.use[side] = n > 0;
-    row.use.checked = state.use[side];
+    item.use[side] = n > 0;
+    row.use.checked = item.use[side];
     refresh();
   });
   row.extend.addEventListener("click", () => {
-    const extra = Number(row.extend.dataset.extra || 0);
-    state.trim[side] += extra;
-    state.use[side] = true;
+    const item = current();
+    if (!item) return;
+    item.trim[side] += Number(row.extend.dataset.extra || 0);
+    item.use[side] = true;
     row.extend.hidden = true;
     refresh();
   });
@@ -96,153 +126,187 @@ for (const side of SIDES) {
 
 // -------------------------------------------------------------------- loading
 
-async function decode(file) {
-  if (typeof createImageBitmap === "function") {
-    try {
-      // from-image applies EXIF rotation, so a camera photo measures the way it
-      // looks. Screenshots carry no orientation tag, so this is a no-op there.
-      return await createImageBitmap(file, { imageOrientation: "from-image" });
-    } catch {
-      try {
-        return await createImageBitmap(file);
-      } catch {
-        /* fall through to the <img> path */
-      }
-    }
-  }
-  return await new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("decode failed"));
-    };
-    img.src = url;
-  });
-}
-
-async function loadFile(file) {
-  if (!file) return;
-  if (!file.type.startsWith("image/")) {
-    showPickError("That doesn't look like an image file.");
+async function addFiles(fileList) {
+  const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
+  if (!files.length) {
+    showPickError("No image files there. Pick a PNG, JPEG, or HEIC screenshot.");
     return;
   }
   hidePickError();
-  clearImage();
-
-  let source;
-  try {
-    source = await decode(file);
-  } catch {
-    showPickError(
-      "This browser couldn't read that image. If it's a HEIC photo, try exporting it as JPEG first.",
-    );
-    return;
-  }
-
-  const width = source.naturalWidth || source.width;
-  const height = source.naturalHeight || source.height;
-  if (!width || !height) {
-    showPickError("That image has no readable dimensions.");
-    return;
-  }
-
-  state.file = file;
-  state.source = source;
-  state.width = width;
-  state.height = height;
-
-  // Read the pixels once, at full resolution, from a throwaway canvas.
-  const scratch = document.createElement("canvas");
-  scratch.width = width;
-  scratch.height = height;
-  const ctx = scratch.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(source, 0, 0);
-  try {
-    state.imageData = ctx.getImageData(0, 0, width, height);
-  } catch {
-    showPickError("This browser blocked reading that image's pixels.");
-    clearImage();
-    return;
-  }
-  scratch.width = scratch.height = 0;
-
-  // The picker is a big target on an empty page, but once there's an image to
-  // look at it would push the measurements off a phone screen. Start over
-  // brings it back.
+  closeEditor();
   el.pick.hidden = true;
-  el.work.hidden = false;
-  measure();
-  drawPreview();
+  el.progress.hidden = false;
+
+  let failures = 0;
+  for (let i = 0; i < files.length; i++) {
+    el.progressText.textContent =
+      files.length > 1 ? `Measuring ${i + 1} of ${files.length}…` : "Measuring…";
+    el.progressBar.style.width = `${Math.round((i / files.length) * 100)}%`;
+    // Yield so the progress line actually paints between images.
+    await new Promise((r) => setTimeout(r, 0));
+    const item = await processFile(files[i]);
+    if (item.error) failures++;
+    state.items.push(item);
+  }
+
+  el.progress.hidden = true;
+  el.progressBar.style.width = "0%";
+  if (failures) {
+    showPickError(
+      failures === files.length
+        ? "None of those could be read. If they're HEIC photos, try exporting as JPEG first."
+        : `${failures} of ${files.length} couldn't be read and were skipped.`,
+    );
+  }
+  state.items = state.items.filter((it) => !it.error);
+  if (!state.items.length) {
+    el.pick.hidden = false;
+    return;
+  }
+
+  if (state.items.length === 1) {
+    await openEditor(0);
+  } else {
+    showBatch();
+  }
+  el.output.hidden = false;
+  scheduleBuild();
 }
 
-function measure() {
-  state.detection =
-    state.tolerance === "auto"
-      ? detectVoidsAuto(state.imageData)
-      : detectVoids(state.imageData, { tolerance: state.tolerance });
-  for (const side of SIDES) {
-    state.trim[side] = state.detection[side];
-    state.use[side] = state.detection[side] > 0;
+/** Decode, measure, crop and encode one file, holding on to as little as possible. */
+async function processFile(file) {
+  const item = {
+    file,
+    name: file.name || "screenshot",
+    width: 0,
+    height: 0,
+    detection: null,
+    trim: { top: 0, bottom: 0, left: 0, right: 0 },
+    use: { top: false, bottom: false, left: false, right: false },
+    transparent: false,
+    outFile: null,
+    thumbUrl: null,
+    include: true,
+    error: null,
+  };
+
+  let source = null;
+  try {
+    source = await decodeImage(file);
+    const { width, height } = sourceSize(source);
+    if (!width || !height) throw new Error("no dimensions");
+    item.width = width;
+    item.height = height;
+
+    const pixels = readPixels(source, width, height);
+    item.detection = measureWith(pixels);
+    for (const side of SIDES) {
+      item.trim[side] = item.detection[side];
+      item.use[side] = item.detection[side] > 0;
+    }
+    item.transparent = hasTransparency(pixels, item.detection.crop);
+    item.thumbUrl = await makeThumb(source, item.detection.crop);
+  } catch {
+    item.error = "unreadable";
+  } finally {
+    // Crucially, the decoded bitmap and its pixel buffer are released per image.
+    // Holding twenty 4MP ImageDatas would be ~320MB and would kill a phone tab.
+    releaseSource(source);
   }
+  return item;
+}
+
+function measureWith(pixels) {
+  return state.tolerance === "auto"
+    ? detectVoidsAuto(pixels)
+    : detectVoids(pixels, { tolerance: state.tolerance });
+}
+
+// --------------------------------------------------------------------- editor
+
+async function openEditor(index) {
+  closeEditor();
+  state.editing = index;
+  const item = state.items[index];
+
+  try {
+    const source = await decodeImage(item.file);
+    state.open = { source, imageData: readPixels(source, item.width, item.height) };
+  } catch {
+    showPickError("That image could not be re-opened for editing.");
+    return;
+  }
+
+  el.batch.hidden = true;
+  el.work.hidden = false;
+  el.back.hidden = !isBatch();
+  drawPreview();
   refresh();
 }
 
-// ------------------------------------------------------------------ rendering
+function closeEditor() {
+  if (state.open) {
+    releaseSource(state.open.source);
+    state.open = null;
+  }
+  state.editing = null;
+  el.preview.width = el.preview.height = 0;
+}
+
+function backToBatch() {
+  closeEditor();
+  el.work.hidden = true;
+  showBatch();
+  scheduleBuild();
+}
 
 function drawPreview() {
+  const item = current();
+  if (!item || !state.open) return;
   // Draw at display scale rather than natural size: a 12 MP photo does not need
   // a 12 MP canvas sitting in the DOM. The band overlays are positioned in
   // percentages, so they line up at any scale.
-  const longest = Math.max(state.width, state.height);
-  const scale = Math.min(1, 1400 / longest);
-  const w = Math.max(1, Math.round(state.width * scale));
-  const h = Math.max(1, Math.round(state.height * scale));
+  const scale = Math.min(1, 1400 / Math.max(item.width, item.height));
+  const w = Math.max(1, Math.round(item.width * scale));
+  const h = Math.max(1, Math.round(item.height * scale));
   el.preview.width = w;
   el.preview.height = h;
   const ctx = el.preview.getContext("2d");
   ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(state.source, 0, 0, w, h);
+  ctx.drawImage(state.open.source, 0, 0, w, h);
 }
 
-function effective(side) {
-  return state.use[side] ? state.trim[side] : 0;
+function effective(item, side) {
+  return item.use[side] ? item.trim[side] : 0;
 }
 
-function currentRect() {
+function rectFor(item) {
   return cropRect(
-    { width: state.width, height: state.height },
+    { width: item.width, height: item.height },
     {
-      top: effective("top"),
-      bottom: effective("bottom"),
-      left: effective("left"),
-      right: effective("right"),
+      top: effective(item, "top"),
+      bottom: effective(item, "bottom"),
+      left: effective(item, "left"),
+      right: effective(item, "right"),
     },
   );
 }
 
-function pctOf(side) {
-  const total = side === "top" || side === "bottom" ? state.height : state.width;
-  return total ? (state.trim[side] / total) * 100 : 0;
-}
-
 function refresh() {
-  const det = state.detection;
-  if (!det) return;
+  const item = current();
+  if (!item || !item.detection) return;
+  const det = item.detection;
 
   for (const side of SIDES) {
     const row = rows[side];
     const info = det.sides[side];
-    const px = state.trim[side];
+    const px = item.trim[side];
 
-    row.use.checked = state.use[side];
+    row.use.checked = item.use[side];
     if (document.activeElement !== row.px) row.px.value = String(px);
-    row.px.max = String(side === "top" || side === "bottom" ? state.height : state.width);
-    row.pct.textContent = px > 0 ? `${(Math.round(pctOf(side) * 10) / 10).toFixed(1)}%` : "—";
+    row.px.max = String(side === "top" || side === "bottom" ? item.height : item.width);
+    const total = side === "top" || side === "bottom" ? item.height : item.width;
+    row.pct.textContent = px > 0 ? `${((px / total) * 100).toFixed(1)}%` : "—";
     row.root.classList.toggle("is-empty", px === 0);
 
     if (info.hex) {
@@ -264,30 +328,29 @@ function refresh() {
     }
   }
 
-  // Position the shaded overlays.
   for (const side of SIDES) {
     const band = el.bands[side];
-    const px = effective(side);
+    const px = effective(item, side);
     const vertical = side === "top" || side === "bottom";
-    const pct = ((px / (vertical ? state.height : state.width)) * 100).toFixed(4) + "%";
+    const pct = ((px / (vertical ? item.height : item.width)) * 100).toFixed(4) + "%";
     band.hidden = px === 0;
     band.querySelector("span").textContent = `${px} px`;
     if (vertical) {
       band.style.height = pct;
     } else {
       band.style.width = pct;
-      band.style.top = ((effective("top") / state.height) * 100).toFixed(4) + "%";
-      band.style.bottom = ((effective("bottom") / state.height) * 100).toFixed(4) + "%";
+      band.style.top = ((effective(item, "top") / item.height) * 100).toFixed(4) + "%";
+      band.style.bottom = ((effective(item, "bottom") / item.height) * 100).toFixed(4) + "%";
     }
   }
 
-  const rect = currentRect();
-  const removed = 1 - (rect.width * rect.height) / (state.width * state.height);
-  const anyTrim = SIDES.some((s) => effective(s) > 0);
+  const rect = rectFor(item);
+  const removed = 1 - (rect.width * rect.height) / (item.width * item.height);
+  const anyTrim = SIDES.some((s) => effective(item, s) > 0);
   el.summary.innerHTML = anyTrim
-    ? `Original <b>${state.width} × ${state.height}</b> → cropped <b>${rect.width} × ${rect.height}</b> · ` +
+    ? `Original <b>${item.width} × ${item.height}</b> → cropped <b>${rect.width} × ${rect.height}</b> · ` +
       `<b>${(removed * 100).toFixed(1)}%</b> removed`
-    : `Original <b>${state.width} × ${state.height}</b> · nothing selected to trim`;
+    : `Original <b>${item.width} × ${item.height}</b> · nothing selected to trim`;
 
   if (det.blankImage) {
     showWarning("This image is blank edge to edge, so there's nothing to crop out of it.");
@@ -305,15 +368,67 @@ function refresh() {
         ? "No blank edges found — this image looks like it already fills the frame. You can still type in your own numbers."
         : "No blank edges found at this strictness. Switch back to <b>Auto</b>, or type the numbers yourself.",
     );
-  } else if (state.width * state.height > MAX_PIXELS) {
+  } else if (item.width * item.height > MAX_PIXELS) {
     showWarning(
-      `That's a ${(( state.width * state.height) / 1e6).toFixed(1)} megapixel image. Some phone browsers cap canvas size near 16 MP, so if the saved file looks wrong, shrink it first.`,
+      `That's a ${((item.width * item.height) / 1e6).toFixed(1)} megapixel image. Some phone browsers cap canvas size near 16 MP, so if the saved file looks wrong, shrink it first.`,
     );
   } else {
     el.warning.hidden = true;
   }
 
   scheduleBuild();
+}
+
+// ----------------------------------------------------------------- batch view
+
+function showBatch() {
+  el.batch.hidden = false;
+  el.work.hidden = true;
+  el.batchTitle.textContent = `${state.items.length} images`;
+  el.batchList.replaceChildren();
+
+  state.items.forEach((item, index) => {
+    const node = el.batchTemplate.content.firstElementChild.cloneNode(true);
+    const use = node.querySelector(".batch-use");
+    const thumb = node.querySelector(".batch-thumb");
+    const name = node.querySelector(".batch-name");
+    const dims = node.querySelector(".batch-dims");
+    const tune = node.querySelector(".batch-tune");
+
+    use.checked = item.include;
+    use.id = `include-${index}`;
+    use.setAttribute("aria-label", `Include ${item.name}`);
+    if (item.thumbUrl) thumb.src = item.thumbUrl;
+    name.textContent = item.name;
+
+    const rect = rectFor(item);
+    const removed = 1 - (rect.width * rect.height) / (item.width * item.height);
+    dims.textContent =
+      removed > 0
+        ? `${item.width}×${item.height} → ${rect.width}×${rect.height} · ${(removed * 100).toFixed(1)}% off`
+        : `${item.width}×${item.height} · nothing to trim`;
+    node.classList.toggle("is-untrimmed", removed <= 0);
+
+    use.addEventListener("change", () => {
+      item.include = use.checked;
+      node.classList.toggle("is-excluded", !item.include);
+      updateBatchSummary();
+      scheduleBuild();
+    });
+    tune.addEventListener("click", () => openEditor(index));
+
+    el.batchList.append(node);
+  });
+
+  updateBatchSummary();
+}
+
+function updateBatchSummary() {
+  const included = state.items.filter((i) => i.include);
+  const trimmed = included.filter((i) => SIDES.some((s) => effective(i, s) > 0));
+  el.batchSummary.innerHTML =
+    `<b>${included.length}</b> of ${state.items.length} selected · ` +
+    `<b>${trimmed.length}</b> had blank space to remove`;
 }
 
 function showWarning(html) {
@@ -330,97 +445,108 @@ function hidePickError() {
   el.pickError.hidden = true;
 }
 
-// ----------------------------------------------------------- building the file
+// ----------------------------------------------------------- building the files
 
 let buildTimer = null;
 
 function scheduleBuild() {
   el.save.disabled = true;
+  el.copy.disabled = true;
   clearTimeout(buildTimer);
-  buildTimer = setTimeout(build, 120);
+  buildTimer = setTimeout(build, 140);
 }
 
-function outputType(inputType) {
-  return ["image/png", "image/jpeg", "image/webp"].includes(inputType) ? inputType : "image/png";
+function typeFor(item) {
+  return outputType(item.file.type, state.format, item.transparent);
 }
 
-function outputName(inputName, type) {
-  const base = (inputName || "screenshot").replace(/\.[^.]+$/, "");
-  const ext = type === "image/jpeg" ? "jpg" : type === "image/webp" ? "webp" : "png";
-  return `${base}-cropped.${ext}`;
-}
-
-// The cropped file is built ahead of the tap, not inside the Save handler.
+// Cropped files are built ahead of the tap, not inside the Save handler.
 // iOS Safari only honours navigator.share() while the tap's transient
-// activation is alive, and canvas.toBlob() is asynchronous — awaiting it first
-// loses the activation and the share sheet silently never opens.
+// activation is alive, and canvas.toBlob() is asynchronous — awaiting it inside
+// the click handler loses the activation and the share sheet silently never
+// opens.
 async function build() {
-  if (!state.source) return;
   const id = ++state.buildId;
-  const rect = currentRect();
-  const type = outputType(state.file.type);
+  const targets = state.editing !== null ? [current()] : state.items.filter((i) => i.include);
+  if (!targets.length) {
+    el.saveHint.textContent = "Nothing selected.";
+    return;
+  }
 
-  const canvas = document.createElement("canvas");
-  canvas.width = rect.width;
-  canvas.height = rect.height;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(state.source, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
+  let bytes = 0;
+  for (const item of targets) {
+    let source = null;
+    try {
+      // Re-decode rather than caching every bitmap; the encode is the slow part
+      // and this keeps peak memory to one image at a time.
+      source = state.open && current() === item ? state.open.source : await decodeImage(item.file);
+      const type = typeFor(item);
+      const blob = await encodeCrop(source, rectFor(item), type);
+      if (id !== state.buildId) return; // superseded by a newer build
+      if (!blob) throw new Error("encode failed");
+      item.outFile = new File([blob], outputName(item.name, type), { type: blob.type });
+      bytes += blob.size;
+    } catch {
+      item.outFile = null;
+    } finally {
+      if (!(state.open && current() === item)) releaseSource(source);
+    }
+  }
+  if (id !== state.buildId) return;
 
-  const blob = await new Promise((resolve) =>
-    canvas.toBlob(resolve, type, type === "image/jpeg" ? 0.92 : undefined),
-  );
-  canvas.width = canvas.height = 0;
-  if (id !== state.buildId) return; // a newer build already superseded this one
-  if (!blob) {
+  const files = targets.map((i) => i.outFile).filter(Boolean);
+  if (!files.length) {
     el.saveHint.textContent = "This browser couldn't encode the cropped image.";
     return;
   }
 
-  releaseOutput();
-  state.outFile = new File([blob], outputName(state.file.name, type), { type: blob.type });
   el.save.disabled = false;
-  el.saveHint.textContent = canShareFile(state.outFile)
-    ? `${formatBytes(blob.size)} · Save opens the share sheet — pick “Save Image” or “Save to Files”.`
-    : `${formatBytes(blob.size)} · Save downloads the cropped image.`;
+  el.save.textContent = files.length > 1 ? `Save all ${files.length}` : "Save";
+  // Copying is inherently one image, so it only appears for a single target.
+  el.copy.hidden = !(canCopyImages() && files.length === 1);
+  el.copy.disabled = false;
+
+  const shareable = canShareFiles(files);
+  el.saveHint.textContent = shareable
+    ? `${formatBytes(bytes)} · Save opens the share sheet — pick “Save Image” or “Save to Files”.`
+    : `${formatBytes(bytes)} · Save downloads ${files.length > 1 ? "the files" : "the cropped image"}.`;
+  updateFormatNote(targets);
 }
 
-function canShareFile(file) {
-  return Boolean(navigator.canShare && navigator.share && navigator.canShare({ files: [file] }));
-}
+function updateFormatNote(targets) {
+  const sample = targets[0];
+  const type = typeFor(sample);
+  const label = type === "image/jpeg" ? "JPEG" : type === "image/webp" ? "WebP" : "PNG";
+  const transparent = targets.some((i) => i.transparent);
 
-function formatBytes(n) {
-  return n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function releaseOutput() {
-  if (state.outUrl) {
-    URL.revokeObjectURL(state.outUrl);
-    state.outUrl = null;
+  if (state.format === "auto") {
+    el.formatNote.innerHTML =
+      `Matching each original — this one saves as <b>${label}</b>. ` +
+      (type === "image/png"
+        ? "Cropping only drops pixels, so a PNG screenshot stays pixel-for-pixel identical."
+        : "The source is already a compressed photo; re-wrapping it as PNG would not recover quality, only add size.");
+  } else if (state.format === "jpeg" && transparent) {
+    el.formatNote.innerHTML =
+      "Some of these have transparent edges, so they'll stay <b>PNG</b> — JPEG has no transparency and would fill those areas in.";
+  } else if (state.format === "jpeg") {
+    el.formatNote.innerHTML = "Smaller files, and re-encoding adds one generation of loss.";
+  } else {
+    el.formatNote.innerHTML =
+      "Lossless. A PNG screenshot stays identical; a photo will be noticeably larger than the original.";
   }
-  state.outFile = null;
 }
 
-function download(file) {
-  state.outUrl = URL.createObjectURL(file);
-  const a = document.createElement("a");
-  a.href = state.outUrl;
-  a.download = file.name;
-  a.rel = "noopener";
-  document.body.append(a);
-  a.click();
-  a.remove();
-  el.saveHint.textContent = "Downloaded.";
-}
-
-// --------------------------------------------------------------------- events
+// --------------------------------------------------------------------- actions
 
 el.save.addEventListener("click", async () => {
-  const file = state.outFile;
-  if (!file) return;
-  if (canShareFile(file)) {
+  const targets = state.editing !== null ? [current()] : state.items.filter((i) => i.include);
+  const files = targets.map((i) => i.outFile).filter(Boolean);
+  if (!files.length) return;
+
+  if (canShareFiles(files)) {
     try {
       // Called synchronously in the handler — see the note on build().
-      await navigator.share({ files: [file] });
+      await navigator.share({ files });
       el.saveHint.textContent = "Sent to the share sheet.";
       return;
     } catch (err) {
@@ -428,44 +554,92 @@ el.save.addEventListener("click", async () => {
       // Anything else (a browser that claims canShare but refuses) falls back.
     }
   }
-  download(file);
+  for (const file of files) downloadFile(file);
+  el.saveHint.textContent = files.length > 1 ? `Downloaded ${files.length} files.` : "Downloaded.";
+});
+
+el.copy.addEventListener("click", async () => {
+  const item = state.editing !== null ? current() : state.items.find((i) => i.include);
+  if (!item) return;
+  try {
+    // Clipboard bitmaps are PNG-only across browsers, so re-encode if the save
+    // format is JPEG. The promise is handed straight to ClipboardItem so Safari
+    // keeps the tap's activation — see copyImage().
+    const png =
+      item.outFile && item.outFile.type === "image/png"
+        ? Promise.resolve(item.outFile)
+        : (async () => {
+            const source = await decodeImage(item.file);
+            const blob = await encodeCrop(source, rectFor(item), "image/png");
+            releaseSource(source);
+            return blob;
+          })();
+    await copyImage(png);
+    el.saveHint.textContent = "Copied — paste it anywhere.";
+  } catch {
+    el.saveHint.textContent = "This browser wouldn't let the page copy an image.";
+  }
 });
 
 el.reset.addEventListener("click", () => {
-  clearImage();
-  el.work.hidden = true;
-  el.pick.hidden = false;
+  clearAll();
   el.file.value = "";
-  el.saveHint.textContent = "";
-  hidePickError();
   el.file.focus();
 });
 
-function clearImage() {
-  if (state.source && typeof state.source.close === "function") state.source.close();
-  releaseOutput();
+el.back.addEventListener("click", backToBatch);
+el.batchAdd.addEventListener("click", () => el.file.click());
+
+function clearAll() {
+  closeEditor();
   state.buildId++;
   clearTimeout(buildTimer);
-  state.file = null;
-  state.source = null;
-  state.imageData = null;
-  state.detection = null;
-  state.width = state.height = 0;
-  el.preview.width = el.preview.height = 0;
+  for (const item of state.items) {
+    if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
+  }
+  state.items = [];
+  el.batchList.replaceChildren();
+  el.work.hidden = true;
+  el.batch.hidden = true;
+  el.output.hidden = true;
+  el.progress.hidden = true;
+  el.pick.hidden = false;
   el.save.disabled = true;
+  el.save.textContent = "Save";
+  el.copy.hidden = true;
   el.warning.hidden = true;
+  el.saveHint.textContent = "";
+  hidePickError();
 }
 
-el.file.addEventListener("change", () => loadFile(el.file.files[0]));
+el.file.addEventListener("change", () => {
+  if (el.file.files.length) addFiles(el.file.files);
+});
 
 for (const button of el.tolerance) {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     const raw = button.dataset.tolerance;
     state.tolerance = raw === "auto" ? "auto" : Number(raw);
-    for (const other of el.tolerance) {
-      other.setAttribute("aria-checked", String(other === button));
+    for (const other of el.tolerance) other.setAttribute("aria-checked", String(other === button));
+    // Only the open image is re-measured; batch items keep what they already
+    // have unless you open them.
+    const item = current();
+    if (item && state.open) {
+      item.detection = measureWith(state.open.imageData);
+      for (const side of SIDES) {
+        item.trim[side] = item.detection[side];
+        item.use[side] = item.detection[side] > 0;
+      }
+      refresh();
     }
-    if (state.imageData) measure();
+  });
+}
+
+for (const button of el.format) {
+  button.addEventListener("click", () => {
+    state.format = button.dataset.format;
+    for (const other of el.format) other.setAttribute("aria-checked", String(other === button));
+    scheduleBuild();
   });
 }
 
@@ -481,17 +655,17 @@ for (const type of ["dragleave", "drop"]) {
 }
 el.pick.addEventListener("drop", (e) => {
   e.preventDefault();
-  loadFile(e.dataTransfer?.files?.[0]);
+  addFiles(e.dataTransfer?.files);
 });
 // The browser would otherwise navigate away to a file dropped anywhere else.
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());
 
 document.addEventListener("paste", (e) => {
-  const file = Array.from(e.clipboardData?.files || []).find((f) => f.type.startsWith("image/"));
-  if (file) loadFile(file);
+  const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith("image/"));
+  if (files.length) addFiles(files);
 });
 
 // Nothing survives a reload: no storage is written, and the object URLs and
-// decoded bitmap are released here as well as on Start over.
-window.addEventListener("pagehide", clearImage);
+// decoded bitmaps are released here as well as on Start over.
+window.addEventListener("pagehide", clearAll);

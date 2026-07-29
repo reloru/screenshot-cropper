@@ -412,6 +412,132 @@ main {
   min-height: 1.2em;
 }
 
+/* ---- Batch list ---- */
+
+.linkish {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0.35rem 0;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--accent);
+  cursor: pointer;
+  min-height: 32px;
+}
+
+.back {
+  align-self: flex-start;
+  margin-bottom: 0.15rem;
+}
+
+.batch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.batch-row {
+  display: grid;
+  grid-template-columns: 1.5rem 3.25rem 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem;
+  border-radius: 10px;
+  background: var(--card-2);
+}
+
+.batch-row.is-excluded {
+  opacity: 0.45;
+}
+
+.batch-use {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.batch-thumb {
+  width: 3.25rem;
+  height: 3.25rem;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #0b0e14;
+}
+
+.batch-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.batch-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-dims {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-row.is-untrimmed .batch-dims {
+  color: var(--ink-dim);
+  font-style: italic;
+}
+
+.batch-tune {
+  appearance: none;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+  min-height: 34px;
+}
+
+/* ---- Progress ---- */
+
+.bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--card-2);
+  overflow: hidden;
+  margin-top: 0.6rem;
+}
+
+.bar > div {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+#progress-text {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ink-dim);
+}
+
+.format-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+.format-note b {
+  color: var(--ink);
+}
+
+
 .notice,
 .error {
   margin: 0.75rem 0 0;
