@@ -87,6 +87,80 @@ function colorDistance(a, b) {
   return Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b), Math.abs(a.a - b.a));
 }
 
+// The very last line of a void is often not void at all — it is a BLEND of the
+// bar and the content beneath it, because the crop that produced the bar landed
+// between pixels. Measured on a real photo, the final column was 22% white over
+// 78% content, all the way down. That is far too contaminated to keep (it reads
+// as a faint white line) but it is not remotely flat — the content shows
+// through, so its spread is ~170 and no tolerance will ever make flatColor()
+// accept it. It has to be recognised by its structure instead.
+//
+// The structure is exactly one equation: edge = a*void + (1-a)*inner. Solve it
+// per channel against the line one step further in. A blend line gives a
+// consistent a of ~0.2; an ordinary content line at the frame edge gives ~0.02.
+// A 10x separation, so the threshold is not delicate.
+const BLEED = {
+  // Below this the wash is invisible anyway, and clean edges live at ~0.02.
+  minAlpha: 0.1,
+  // A wash is uniform, and this is the threshold that does the real work. Two
+  // structurally different lines still produce some median `a` by coincidence
+  // (a synthetic content boundary managed 0.28), but they disagree wildly about
+  // it: measured spreads were 0.30 and 0.59 there, against 0.026-0.059 for the
+  // four genuine blend edges in the reported batch. 0.15 sits well clear of
+  // both — 2.5x the worst real blend, half the mildest false positive.
+  maxSpread: 0.15,
+  // A boundary is one or two pixels wide. This cap is what makes the rule
+  // incapable of eating anything that matters.
+  max: 2,
+  // Channels already at the void colour cannot identify `a` (0/0), so they are
+  // skipped rather than allowed to contribute noise.
+  headroom: 25,
+};
+
+// Per-channel median of a line. lineColor() returns one PIXEL's colour (the
+// median by luma), which is the right reference for "does this line match
+// itself" but the wrong one for solving the blend equation: on a speckled bar
+// that single pixel can carry an off channel — a real white bar sampled
+// (255, 209, 255) — and a bogus channel wrecks the algebra for that channel
+// alone, inflating the spread until a genuine blend edge gets rejected.
+function lineMedianColor(data, offsetAt, length) {
+  const step = Math.max(1, Math.floor(length / 128));
+  const ch = [[], [], []];
+  for (let i = 0; i < length; i += step) {
+    const o = offsetAt(i);
+    for (let c = 0; c < 3; c++) ch[c].push(data[o + c]);
+  }
+  if (!ch[0].length) return null;
+  const mid = (a) => {
+    a.sort((x, y) => x - y);
+    return a[a.length >> 1];
+  };
+  return { r: mid(ch[0]), g: mid(ch[1]), b: mid(ch[2]) };
+}
+
+// Solve edge = a*void + (1-a)*inner per channel; report the median and spread
+// of the solutions. Null when too few channels had headroom to be conclusive.
+function blendAlpha(data, edgeAt, innerAt, length, ref) {
+  const solved = [];
+  const step = Math.max(1, Math.floor(length / 256));
+  const voidCh = [ref.r, ref.g, ref.b];
+  for (let i = 0; i < length; i += step) {
+    const eo = edgeAt(i);
+    const io = innerAt(i);
+    // A blend of a transparent void is an alpha ramp, not a colour mix.
+    if (ref.a === 0 || data[eo + 3] !== 255 || data[io + 3] !== 255) return null;
+    for (let c = 0; c < 3; c++) {
+      const denom = voidCh[c] - data[io + c];
+      if (Math.abs(denom) < BLEED.headroom) continue;
+      solved.push((data[eo + c] - data[io + c]) / denom);
+    }
+  }
+  if (solved.length < 24) return null;
+  solved.sort((a, b) => a - b);
+  const at = (p) => solved[Math.min(solved.length - 1, Math.floor(solved.length * p))];
+  return { median: at(0.5), spread: at(0.75) - at(0.25) };
+}
+
 // Walk inward from an edge counting blank lines.
 //
 // Two rules do the real work:
@@ -119,7 +193,31 @@ function scanBand(data, lineAt, lineLength, start, step, limit, opts, wantNext =
     }
   }
 
-  const px = lastBlank + 1;
+  let px = lastBlank + 1;
+
+  // Absorb the blend line(s) at the boundary. Gated on having actually found a
+  // band, because `prevRef` IS the void colour — without a band there is no
+  // reference to solve against and no reason to think the edge is contaminated.
+  // Skipped after a jump: that means another solid block starts here, which is
+  // the `nextPx` case below, not a soft boundary.
+  if (!stoppedOnJump && px > 0 && prevRef) {
+    // Solve against the last blank line's per-channel median, not prevRef —
+    // see lineMedianColor(). Alpha is unchanged for a clean bar and far steadier
+    // for a speckled one. Falls back to prevRef if the line can't be sampled.
+    const voidRef = lineMedianColor(data, lineAt(start + step * (px - 1)), lineLength) ?? prevRef;
+    for (let n = 0; n < BLEED.max && px + 1 < limit; n++) {
+      const blend = blendAlpha(
+        data,
+        lineAt(start + step * px),
+        lineAt(start + step * (px + 1)),
+        lineLength,
+        { ...voidRef, a: prevRef.a },
+      );
+      if (!blend || blend.median < BLEED.minAlpha || blend.spread > BLEED.maxSpread) break;
+      px++;
+    }
+  }
+
   let nextPx = 0;
   // Only offer to extend when a color change is what stopped us — that is the
   // "there is another solid band right there" case. If content stopped the scan

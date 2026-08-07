@@ -324,3 +324,56 @@ test("a smoothly-lit photo is not eaten just because high tolerance flattens it"
   const r = detectVoidsAuto(img);
   assert.equal(r.top, 0, `top=${r.top}: trimmed 200px of actual photo`);
 });
+
+test("the blended boundary line is absorbed, not left as a faint white edge", () => {
+  // Second real-batch report: after soft ramps were fixed, a "very faint white
+  // line" still showed on the sides. Measured on the file, the final column was
+  // a uniform 22% white over 78% content — far too contaminated to keep, but
+  // with a spread of ~170 it can never pass flatColor() at any tolerance. It is
+  // recognised structurally instead: edge = a*void + (1-a)*inner.
+  //
+  // The content here is locally SMOOTH, which is the property that makes the
+  // equation solvable at all — a real photo's neighbouring columns are nearly
+  // equal, so the blend column resolves against the one beside it.
+  const BAR = 30;
+  const ALPHA = 0.22;
+  const width = 2 * (BAR + 1) + 200;
+  const content = (x, y) => {
+    const v = (k) => 90 + 46 * Math.sin((x + k * 3) / 31) + 38 * Math.sin(y / 19) + 18 * Math.sin((x + y) / 13);
+    return [0, 1, 2].map((k) => Math.max(4, Math.min(232, Math.round(v(k)))));
+  };
+  const paint = (x, y) => {
+    const from = Math.min(x, width - 1 - x);
+    if (from < BAR) return [255, 255, 255, 255];
+    const c = content(x, y);
+    if (from === BAR) return [...c.map((n) => Math.round(n + ALPHA * (255 - n))), 255];
+    return [...c, 255];
+  };
+  const img = rows(width, [[240, paint]]);
+
+  const r = detectVoidsAuto(img);
+  assert.equal(r.left, BAR + 1, `left=${r.left}: the blended column was left behind`);
+  assert.equal(r.right, BAR + 1, `right=${r.right}: the blended column was left behind`);
+});
+
+test("an ordinary bright edge is not mistaken for a blended boundary", () => {
+  // The guard on the rule above. Content that is simply lighter at the frame
+  // edge must survive: with no band found there is no void colour to solve
+  // against, and even with one, a structurally different line gives wildly
+  // inconsistent values for `a` rather than a uniform wash.
+  const width = 260;
+  const img = rows(width, [
+    [
+      240,
+      (x, y) => {
+        const edge = Math.min(x, width - 1 - x) < 2;
+        const base = [40 + ((x * 53 + y * 31) % 180), 30 + ((x * 17 + y * 7) % 200), 60 + ((x * 29) % 170)];
+        // Brighter at the edge, but structured — not a flat wash toward white.
+        return edge ? [...base.map((v, i) => Math.min(255, v + 50 + ((y * (7 + i)) % 60))), 255] : [...base, 255];
+      },
+    ],
+  ]);
+  const r = detectVoidsAuto(img);
+  assert.equal(r.left, 0, `left=${r.left}: trimmed real content`);
+  assert.equal(r.right, 0, `right=${r.right}: trimmed real content`);
+});

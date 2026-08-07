@@ -98,6 +98,19 @@ anything more than 2px above the run's anchor would have started a new run.
 Tolerance that begins eating real content doesn't creep, it lunges (0 → 206 on a
 smoothly-lit wall), so it breaks the run and loses on length instead.
 
+One line further in, the boundary pixel is often a **blend** rather than either
+thing: the crop that made the bar landed between pixels, so the last column is
+(say) 22% white over 78% content, uniformly down its length. It reads as a faint
+white line, but with the content showing through its spread is ~170 and no
+tolerance will ever call it flat. It's caught structurally instead, by solving
+`edge = a·void + (1-a)·inner` per channel against the line beside it. A blend
+line gives a consistent `a` of ~0.2; ordinary content at the frame edge gives
+~0.02, so the separation is about tenfold. The *consistency* is what does the
+real work — a structurally different line still produces some `a` by
+coincidence, but the solutions scatter (spread 0.30–0.59, against 0.03–0.06 for
+genuine blends). Bounded to 2px, and skipped entirely when no band was found,
+since without one there is no void colour to solve against.
+
 Exact / Normal / Loose remain as manual overrides.
 
 **Straightened photos are out of scope by construction.** If you rotate a photo,
