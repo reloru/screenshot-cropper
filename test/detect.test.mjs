@@ -272,3 +272,55 @@ test("a straightened photo is identified rather than reported as nothing", () =>
   assert.equal(r.hasVoid, false, "correctly finds no straight edge to trim");
   assert.equal(r.rotated, true, "and recognises why");
 });
+
+test("a soft-edged bar is trimmed all the way, leaving no sliver", () => {
+  // From a real 58-photo batch: every JPEG selfie with white side bars came out
+  // with 1-2 columns of white still attached.
+  //
+  // A void does not end on a pixel boundary. JPEG and antialiasing leave the
+  // last columns dimmed AND slightly mottled, so they are still blank but only
+  // read as flat at a HIGHER tolerance than the pure bar does. Measured off the
+  // real files: the pure bar is 255 flat, then one column at ~248 with a spread
+  // of ~9, then one at ~229 with a spread of ~34, then content (spread ~170).
+  //
+  // So the sweep creeps 40, 40, 41, 41, 42, 42, 42... The old plateau grew one
+  // run across all of that and reported its ANCHOR (40), leaving the sliver.
+  // The run's max (42) is the answer it settles on.
+  const BAR = 40;
+  const width = 2 * (BAR + 2) + 200;
+  const mottle = (x, y, amp) => Math.round(Math.sin(x * 12.9898 + y * 78.233) * amp);
+  const paint = (x, y) => {
+    const from = Math.min(x, width - 1 - x); // distance from the nearer side
+    if (from < BAR) return [255, 255, 255, 255];
+    if (from === BAR) { const v = 248 + mottle(x, y, 5); return [v, v, v, 255]; }
+    if (from === BAR + 1) { const v = 229 + mottle(x, y, 18); return [v, v, v, 255]; }
+    return [40 + ((x * 53 + y * 31) % 180), 30 + ((x * 17 + y * 7) % 200), 60 + ((x * 29) % 170), 255];
+  };
+  const img = rows(width, [[220, paint]]);
+
+  const r = detectVoidsAuto(img);
+  assert.equal(r.left, BAR + 2, `left=${r.left}, want ${BAR + 2} — a white sliver survived`);
+  assert.equal(r.right, BAR + 2, `right=${r.right}, want ${BAR + 2} — a white sliver survived`);
+});
+
+test("a smoothly-lit photo is not eaten just because high tolerance flattens it", () => {
+  // The counterweight to the test above, and the reason plateau() takes the max
+  // of ONE run rather than of the whole sweep. A dim, evenly-lit wall (a bedroom
+  // mirror selfie, in the batch that prompted this) reads as flat once tolerance
+  // climbs high enough, so the sweep reads 0,0,0,0,0,0,200,200,200,200.
+  //
+  // Content-eating lunges; a soft edge creeps. The lunge is far outside
+  // PLATEAU_SLACK, so it starts a NEW run and the run of zeroes wins on length.
+  // Taking the max must never reach across that boundary.
+  const width = 240;
+  const AMP = 36; // enough tonal range that the wall only flattens at tol 40+
+  const wall = (x, y) => {
+    const v = 150 + (((x * 7 + y * 13) % (2 * AMP + 1)) - AMP);
+    return [v, v - 2, v - 8, 255];
+  };
+  const busy = (x, y) => [30 + ((x * 61 + y * 23) % 200), 20 + ((x * 13) % 210), 50 + ((y * 37) % 190), 255];
+  const img = rows(width, [[200, wall], [300, busy]]);
+
+  const r = detectVoidsAuto(img);
+  assert.equal(r.top, 0, `top=${r.top}: trimmed 200px of actual photo`);
+});

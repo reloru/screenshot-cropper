@@ -253,16 +253,47 @@ export function detectVoids(image, options = {}) {
 }
 
 // The longest run of near-identical values, and the value it settles on.
+//
+// A run is grown against its own first value, so every member sits within
+// PLATEAU_SLACK of the anchor and the run really is "one answer, measured ten
+// ways". The value reported is the run's MAXIMUM, not its anchor.
+//
+// That distinction is the whole point. A void does not end on a pixel boundary:
+// JPEG and antialiasing leave the last column or two of a white bar dimmed
+// (255 -> 248 -> 229 -> content). Those columns are still blank — uniform in
+// themselves — they just need a higher tolerance to read as flat. So the sweep
+// creeps 40, 40, 40, 41, 42, 42, 42 and the honest answer is 42. Reporting the
+// anchor gave 40 and left a two-pixel white sliver on every photo with a soft
+// edge, which is exactly what a real 58-image batch turned up.
+//
+// Taking the max is safe because it is bounded by construction: a member more
+// than PLATEAU_SLACK above the anchor would have started a new run, so this can
+// never exceed anchor + PLATEAU_SLACK. Tolerance that starts eating real content
+// does not creep — it lunges (0 -> 206 on a smoothly-lit wall), which breaks the
+// run and loses on length instead.
+const PLATEAU_SLACK = 2;
+
 function plateau(values) {
   let best = { length: 0, value: values[0] ?? 0, index: 0 };
   let i = 0;
   while (i < values.length) {
     let j = i;
-    while (j + 1 < values.length && Math.abs(values[j + 1] - values[i]) <= 2) j++;
+    let max = values[i];
+    // `index` must point at the run member that produced the reported value,
+    // not at the run's start — detectVoidsAuto() reads that run's band color and
+    // "+N px more" chip back out, and they have to describe the same edge.
+    let maxIndex = i;
+    while (j + 1 < values.length && Math.abs(values[j + 1] - values[i]) <= PLATEAU_SLACK) {
+      j++;
+      if (values[j] > max) {
+        max = values[j];
+        maxIndex = j;
+      }
+    }
     const length = j - i + 1;
     // >= keeps the LAST equally-long run: at equal evidence prefer the higher
     // tolerance, which is the one that got past the noise.
-    if (length >= best.length) best = { length, value: values[i], index: i };
+    if (length >= best.length) best = { length, value: max, index: maxIndex };
     i = j + 1;
   }
   return best;

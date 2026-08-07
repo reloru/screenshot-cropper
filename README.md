@@ -86,6 +86,18 @@ noise-limited measurement creeps upward with every step. Taking the flat part
 lands on the true edge. Each side sweeps independently, since one screenshot can
 have crisp black bars top and bottom and a soft gradient at the sides.
 
+The plateau reports its **maximum**, not the value it started at, and that
+detail is load-bearing. A void doesn't end on a pixel boundary: JPEG and
+antialiasing leave the last column or two of a white bar dimmed and slightly
+mottled (255 → 248 → 229 → content). Those columns are still blank — they just
+need a higher tolerance to read as flat — so the sweep creeps 40, 40, 41, 42,
+42, 42 and the honest answer is 42. Reporting the run's starting value gave 40
+and left a 1–2px white sliver on every soft-edged photo, which is exactly what a
+real 58-image batch turned up. Taking the max is bounded by construction:
+anything more than 2px above the run's anchor would have started a new run.
+Tolerance that begins eating real content doesn't creep, it lunges (0 → 206 on a
+smoothly-lit wall), so it breaks the run and loses on length instead.
+
 Exact / Normal / Loose remain as manual overrides.
 
 **Straightened photos are out of scope by construction.** If you rotate a photo,
