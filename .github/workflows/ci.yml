@@ -16,8 +16,15 @@ jobs:
           node-version: 22
       # No runtime dependencies, and the tests import only node builtins plus
       # the app's own modules — so there is nothing to install.
+      #
+      # Go through npm so this can't drift from what `npm test` runs locally.
+      # `node --test test/` (a bare directory) does NOT run the files in it — it
+      # tries to LOAD `test/` as a module and dies with MODULE_NOT_FOUND, which
+      # exits non-zero for a reason that looks nothing like a failing assertion.
+      # This job was red on every run from the repo's first commit onward, so the
+      # measurement logic was effectively ungated.
       - name: Measure-logic tests
-        run: node --test test/
+        run: npm test
 
   build:
     name: Build check (dry-run)
