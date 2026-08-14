@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
   "description": "Measure the blank voids around a phone screenshot and crop them off — entirely in the browser.",
   "repository": {
     "type": "git",
