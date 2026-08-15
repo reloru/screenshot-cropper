@@ -232,11 +232,24 @@ main {
   margin: 0;
 }
 
+/* Two pill groups side by side — they stack on a narrow phone rather than
+   squeezing the heading out. */
+.panel-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
 .tolerance {
   display: flex;
   border: 1px solid var(--line);
   border-radius: 999px;
   overflow: hidden;
+}
+
+.tolerance[hidden] {
+  display: none;
 }
 
 .tolerance button {
@@ -551,6 +564,20 @@ main {
 .error {
   color: var(--void);
   border-color: var(--void);
+}
+
+/* The nudge shown when the mode you are in found nothing and the other one
+   did — the whole point of measuring both up front. */
+.offer {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  border-color: var(--accent);
+}
+
+.offer[hidden] {
+  display: none;
 }
 
 .error[hidden],

@@ -443,6 +443,340 @@ export function detectVoidsAuto(image, options = {}) {
   return result;
 }
 
+// ==========================================================================
+// App chrome — the bands that are NOT voids.
+//
+// A feed screenshot has no blank edge at all. Above the picture sits a status
+// bar, a nav bar, a username, a caption; below it a row of icons, a date, and
+// usually the top of the NEXT post. None of it is blank, so everything above
+// reports four zeroes, and the second screenshot in the pair that prompted this
+// even came back "straightened photo" because its corners happened to be flat.
+//
+// What those bands are instead is a flat interface colour with writing on it.
+// That is the whole idea here: measure how much of each line is one single
+// colour, and how much of it is ink sitting on that colour.
+//
+//   a picture line   — no colour owns it            (coverage 0.03-0.48 measured)
+//   a chrome line    — one colour owns nearly it all (coverage 0.65-1.00)
+//
+// The bands then get read as blocks rather than scanned inward from the edge,
+// because the thing worth keeping is in the MIDDLE. Trimming from the edges can
+// only ever remove the interface above the photo; it can do nothing about the
+// next post showing at the bottom, which is content by any measure and still
+// wants to go. So: classify every row, take the largest run of picture, and
+// report the interface either side of it as the trim.
+// ==========================================================================
+
+export const CHROME_DEFAULTS = {
+  // How close to a line's dominant colour still counts as that colour. Tighter
+  // than the void tolerance on purpose — an interface background is a rendered
+  // constant (#0C0F14 held to +/-3 over 400 rows here), not a photographed one.
+  tolerance: 10,
+  // Fraction of a line owned by that one colour before the line reads as
+  // interface. Measured on the pair of Instagram screenshots this was built
+  // from: picture rows peaked at 0.48 (a meme's white caption text) and chrome
+  // rows bottomed out at 0.65, so the gap is wide and 0.7 sits inside it.
+  coverage: 0.7,
+  // A pixel this far from the dominant colour is "ink" — text, an icon, an
+  // avatar. Deliberately a big number: ink is high-contrast by design, because
+  // it exists to be read.
+  contrast: 60,
+  // Ink covering this much of a line makes it an inked line. 0.5% of 1290px is
+  // ~6 pixels, which is a glyph or two.
+  inkRow: 0.005,
+  // ...and a band must be inked over this fraction of its rows to be interface
+  // at all. THIS IS THE GUARD THAT MATTERS. Without it any flat region of a
+  // real photo — a clear sky, a studio backdrop — is "chrome" and gets cropped
+  // off. Interface has writing on it; sky does not. Every genuine band in the
+  // reference screenshots scored 0.24-0.87 and the one impostor (a blurred
+  // photo strip behind the status bar) scored 0.11.
+  inkBand: 0.15,
+  // How far a band's background may wander before it stops being one band. A
+  // rendered background barely moves; the widest genuine drift measured was 31,
+  // where a circular avatar pulled the dominant colour of its rows. The blurred
+  // impostor above drifted 177.
+  drift: 48,
+  // The picture has to be at least this much of the image. Stops an all-
+  // interface screenshot (a settings page, a chat) from "cropping to" whatever
+  // 40-pixel gap happened to be the largest.
+  minBlock: 0.15,
+};
+
+// At most this many pixels are looked at per line. Every row and column is
+// still profiled — only the walk ALONG each one is sampled — so block edges
+// stay exact to the pixel.
+const CHROME_SAMPLES = 512;
+
+// Scratch histogram, reused across every line of every image, and `TOUCHED` so
+// the bins written can be zeroed in O(samples) instead of clearing all 32768
+// per line. Not re-entrant, which is fine: this is single-threaded and no line
+// profile outlives the call that made it.
+//
+// This runs on every row and every column of a full-resolution screenshot —
+// about four thousand lines — so it is the one place in this file where the
+// shape of the loop matters. Lines are walked as a base offset plus a stride
+// rather than through an index->offset closure like the void scan uses. On a
+// 1290x2796 screenshot the closure version measured 167ms against ~30ms for the
+// entire ten-pass void sweep; base+stride brings it to ~48ms, which is back in
+// proportion to what an image this size costs to decode in the first place.
+const HIST = new Int32Array(1 << 15); // 32 levels per channel
+const TOUCHED = new Int32Array(CHROME_SAMPLES);
+
+/**
+ * Measure one line: which colour owns it, how much of it that colour owns, and
+ * how much of it is ink.
+ *
+ * The dominant colour comes from a coarse histogram rather than a median,
+ * because a chrome line is bimodal — background plus text — and the median of a
+ * busy nav bar is not the background. It is then refined to the MEAN of the
+ * winning bin, and coverage is counted by tolerance around that mean rather
+ * than by bin membership, so a background sitting astride a bin boundary still
+ * reads as one colour.
+ *
+ * @param {number} base   byte offset of the line's first pixel
+ * @param {number} stride bytes between consecutive pixels (4 along a row,
+ *                        width*4 down a column)
+ */
+function lineProfile(data, base, stride, length, tolerance, contrast) {
+  if (length <= 0) return null;
+  const step = Math.max(1, Math.ceil(length / CHROME_SAMPLES));
+  const jump = step * stride;
+  const end = base + length * stride;
+
+  let n = 0;
+  let hits = 0;
+  for (let o = base; o < end; o += jump) {
+    const key = ((data[o] >> 3) << 10) | ((data[o + 1] >> 3) << 5) | (data[o + 2] >> 3);
+    if (HIST[key]++ === 0) TOUCHED[hits++] = key;
+    n++;
+  }
+  if (!n) return null;
+
+  let win = TOUCHED[0];
+  for (let i = 1; i < hits; i++) if (HIST[TOUCHED[i]] > HIST[win]) win = TOUCHED[i];
+  const winCount = HIST[win];
+  for (let i = 0; i < hits; i++) HIST[TOUCHED[i]] = 0;
+
+  // Mean of the winning bin.
+  let sr = 0;
+  let sg = 0;
+  let sb = 0;
+  let sa = 0;
+  for (let o = base; o < end; o += jump) {
+    const key = ((data[o] >> 3) << 10) | ((data[o + 1] >> 3) << 5) | (data[o + 2] >> 3);
+    if (key !== win) continue;
+    sr += data[o];
+    sg += data[o + 1];
+    sb += data[o + 2];
+    sa += data[o + 3];
+  }
+  const rr = sr / winCount;
+  const rg = sg / winCount;
+  const rb = sb / winCount;
+  const ra = sa / winCount;
+
+  let owned = 0;
+  let ink = 0;
+  for (let o = base; o < end; o += jump) {
+    let d = Math.abs(data[o] - rr);
+    const dg = Math.abs(data[o + 1] - rg);
+    if (dg > d) d = dg;
+    const db = Math.abs(data[o + 2] - rb);
+    if (db > d) d = db;
+    const da = Math.abs(data[o + 3] - ra);
+    if (da > d) d = da;
+    if (d <= tolerance) owned++;
+    else if (d > contrast) ink++;
+  }
+  return {
+    cover: owned / n,
+    ink: ink / n,
+    r: Math.round(rr),
+    g: Math.round(rg),
+    b: Math.round(rb),
+    a: Math.round(ra),
+  };
+}
+
+function mergeRuns(runs) {
+  const out = [];
+  for (const run of runs) {
+    const last = out[out.length - 1];
+    if (last && last.chrome === run.chrome) last.b = run.b;
+    else out.push({ ...run });
+  }
+  return out;
+}
+
+// Is this run of flat lines actually interface, or just a smooth part of a
+// photograph? Interface carries ink and holds one colour; a gradient sky
+// carries neither.
+function isChrome(profiles, a, b, opts) {
+  let inked = 0;
+  let loR = 255, loG = 255, loB = 255;
+  let hiR = 0, hiG = 0, hiB = 0;
+  for (let i = a; i < b; i++) {
+    const p = profiles[i];
+    if (p.ink >= opts.inkRow) inked++;
+    if (p.r < loR) loR = p.r;
+    if (p.r > hiR) hiR = p.r;
+    if (p.g < loG) loG = p.g;
+    if (p.g > hiG) hiG = p.g;
+    if (p.b < loB) loB = p.b;
+    if (p.b > hiB) hiB = p.b;
+  }
+  const drift = Math.max(hiR - loR, hiG - loG, hiB - loB);
+  return inked / (b - a) >= opts.inkBand && drift <= opts.drift;
+}
+
+// Absorb runs shorter than `minRun`, shortest first.
+//
+// Needed in both directions. A profile picture is a circle, so the few rows
+// through its middle are wide enough to stop owning their line and would split
+// one chrome band into three. A meme with a white caption bar across it has the
+// mirror problem — a flat strip that would split the picture in two and leave
+// the crop on whichever half was larger. Neither is a real boundary.
+function bridgeRuns(input, minRun) {
+  let runs = input;
+  while (runs.length > 1) {
+    let k = -1;
+    for (let i = 0; i < runs.length; i++) {
+      const len = runs[i].b - runs[i].a;
+      if (len >= minRun) continue;
+      if (k < 0 || len < runs[k].b - runs[k].a) k = i;
+    }
+    if (k < 0) break;
+    runs[k].chrome = !runs[k].chrome;
+    // Flipping always merges with at least one neighbour, so this shrinks the
+    // list every pass and cannot spin.
+    runs = mergeRuns(runs);
+  }
+  return runs;
+}
+
+/**
+ * Split one axis into interface and picture blocks and return the largest run
+ * of picture, as `{a, b, before, after}` where before/after are the adjacent
+ * chrome bands (or null). Null when there is no qualifying block.
+ */
+function contentBlock(profiles, extent, opts) {
+  if (!profiles.length) return null;
+
+  // 1. Flat lines, before anything is merged: validation has to see the raw
+  //    bands. Bridging first would fold that blurred strip into the nav bar
+  //    below it and hand isChrome() a band that is half photo.
+  let runs = [];
+  for (let i = 0; i < profiles.length; i++) {
+    const flat = profiles[i] !== null && profiles[i].cover >= opts.coverage;
+    const last = runs[runs.length - 1];
+    if (last && last.chrome === flat) last.b = i + 1;
+    else runs.push({ chrome: flat, a: i, b: i + 1 });
+  }
+
+  // 2. Demote anything flat that is not inked or does not hold its colour.
+  for (const run of runs) if (run.chrome && !isChrome(profiles, run.a, run.b, opts)) run.chrome = false;
+  runs = mergeRuns(runs);
+
+  // 3. Close the gaps in both directions. 3% of the axis, floored at 24 lines:
+  //    below that a "band" is a UI hairline, not a section.
+  runs = bridgeRuns(runs, Math.max(24, Math.round(extent * 0.03)));
+
+  let best = -1;
+  for (let i = 0; i < runs.length; i++) {
+    if (runs[i].chrome) continue;
+    if (best < 0 || runs[i].b - runs[i].a > runs[best].b - runs[best].a) best = i;
+  }
+  if (best < 0) return null;
+  const block = runs[best];
+  if (block.b - block.a < extent * opts.minBlock) return null;
+  return {
+    a: block.a,
+    b: block.b,
+    before: best > 0 ? runs[best - 1] : null,
+    after: best < runs.length - 1 ? runs[best + 1] : null,
+    allChrome: false,
+  };
+}
+
+// The colour to show for a trimmed band: the dominant colour of its middle row.
+// The row at the boundary is often a blend of the band and the picture, and the
+// row at the far edge can be a different element entirely.
+function bandRef(profiles, run) {
+  if (!run) return null;
+  const p = profiles[(run.a + run.b) >> 1];
+  return p ? { r: p.r, g: p.g, b: p.b, a: p.a } : null;
+}
+
+/**
+ * Measure the interface around the picture in an app screenshot.
+ *
+ * Returns the same shape as detectVoids() so the UI and the crop path can use
+ * either without caring which one ran, plus:
+ *   chrome     — true, to mark which detector produced this
+ *   allChrome  — the image is interface end to end, with no picture in it
+ *
+ * @param {{data: Uint8ClampedArray|Uint8Array, width: number, height: number}} image
+ * @param {Partial<typeof CHROME_DEFAULTS>} [options]
+ */
+export function detectChrome(image, options = {}) {
+  const { data, width, height } = image;
+  if (!width || !height) throw new Error("detectChrome: image has no dimensions");
+  const opts = { ...CHROME_DEFAULTS, ...options };
+
+  // Rows first, then columns across only the surviving rows — the same ordering
+  // and the same reason as the void scan. A full-width nav bar otherwise starts
+  // every column with interface colour and every column reads as chrome.
+  const rowProfiles = [];
+  for (let y = 0; y < height; y++) {
+    rowProfiles.push(lineProfile(data, y * width * 4, 4, width, opts.tolerance, opts.contrast));
+  }
+  const vertical = contentBlock(rowProfiles, height, opts);
+
+  const top = vertical ? vertical.a : 0;
+  const bottom = vertical ? height - vertical.b : 0;
+  const innerHeight = height - top - bottom;
+
+  let horizontal = null;
+  const colProfiles = [];
+  if (innerHeight > 0) {
+    for (let x = 0; x < width; x++) {
+      colProfiles.push(
+        lineProfile(data, (top * width + x) * 4, width * 4, innerHeight, opts.tolerance, opts.contrast),
+      );
+    }
+    horizontal = contentBlock(colProfiles, width, opts);
+  }
+  const left = horizontal ? horizontal.a : 0;
+  const right = horizontal ? width - horizontal.b : 0;
+
+  const band = (px, profiles, run) => ({ px, ref: bandRef(profiles, run), nextPx: 0 });
+  const sides = {
+    top: sideInfo(band(top, rowProfiles, vertical?.before), height),
+    bottom: sideInfo(band(bottom, rowProfiles, vertical?.after), height),
+    left: sideInfo(band(left, colProfiles, horizontal?.before), width),
+    right: sideInfo(band(right, colProfiles, horizontal?.after), width),
+  };
+
+  const hasVoid = top + bottom + left + right > 0;
+  return {
+    width,
+    height,
+    top,
+    bottom,
+    left,
+    right,
+    sides,
+    crop: cropRect({ width, height }, { top, bottom, left, right }),
+    blankImage: false,
+    hasVoid,
+    rotated: false,
+    chrome: true,
+    // Nothing but interface: no run of picture cleared minBlock. Worth saying,
+    // because it is a different answer from "this already fills the frame".
+    allChrome: !vertical && rowProfiles.some((p) => p && p.cover >= opts.coverage),
+  };
+}
+
 /**
  * Turn four trim amounts into a crop rectangle, clamped so the result is always
  * at least 1x1 and always inside the image. Used for the auto-detected values

@@ -60,7 +60,13 @@
         <div class="card">
           <div class="panel-head">
             <h2 id="batch-title">Cropped</h2>
-            <button type="button" id="batch-add" class="linkish">Add more</button>
+            <div class="panel-controls">
+              <div class="tolerance" role="radiogroup" aria-label="What to trim">
+                <button type="button" data-mode="void" role="radio" aria-checked="true">Blank edges</button>
+                <button type="button" data-mode="chrome" role="radio" aria-checked="false">App interface</button>
+              </div>
+              <button type="button" id="batch-add" class="linkish">Add more</button>
+            </div>
           </div>
           <div id="batch-list" class="batch-list"></div>
           <p id="batch-summary" class="summary" role="status"></p>
@@ -84,12 +90,18 @@
 
         <div class="card">
           <div class="panel-head">
-            <h2>Blank space found</h2>
-            <div class="tolerance" role="radiogroup" aria-label="Detection strictness">
-              <button type="button" data-tolerance="auto" role="radio" aria-checked="true">Auto</button>
-              <button type="button" data-tolerance="0" role="radio" aria-checked="false">Exact</button>
-              <button type="button" data-tolerance="12" role="radio" aria-checked="false">Normal</button>
-              <button type="button" data-tolerance="32" role="radio" aria-checked="false">Loose</button>
+            <h2 id="panel-title">Blank space found</h2>
+            <div class="panel-controls">
+              <div class="tolerance" role="radiogroup" aria-label="What to trim">
+                <button type="button" data-mode="void" role="radio" aria-checked="true">Blank edges</button>
+                <button type="button" data-mode="chrome" role="radio" aria-checked="false">App interface</button>
+              </div>
+              <div class="tolerance" id="strictness" role="radiogroup" aria-label="Detection strictness">
+                <button type="button" data-tolerance="auto" role="radio" aria-checked="true">Auto</button>
+                <button type="button" data-tolerance="0" role="radio" aria-checked="false">Exact</button>
+                <button type="button" data-tolerance="12" role="radio" aria-checked="false">Normal</button>
+                <button type="button" data-tolerance="32" role="radio" aria-checked="false">Loose</button>
+              </div>
             </div>
           </div>
 
@@ -97,6 +109,10 @@
 
           <p id="summary" class="summary" role="status"></p>
           <p id="warning" class="notice" hidden></p>
+          <p id="offer" class="notice offer" hidden>
+            <span id="offer-text"></span>
+            <button type="button" id="offer-go" class="linkish"></button>
+          </p>
         </div>
       </section>
 

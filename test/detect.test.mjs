@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { detectVoids, detectVoidsAuto, cropRect, colorName } from "../public/detect.js";
+import { detectVoids, detectVoidsAuto, detectChrome, cropRect, colorName } from "../public/detect.js";
 import { makeImage, setPixel, encodePng, decodePng, rows } from "../scripts/png.mjs";
 
 const BLACK = [0, 0, 0, 255];
@@ -376,4 +376,232 @@ test("an ordinary bright edge is not mistaken for a blended boundary", () => {
   const r = detectVoidsAuto(img);
   assert.equal(r.left, 0, `left=${r.left}: trimmed real content`);
   assert.equal(r.right, 0, `right=${r.right}: trimmed real content`);
+});
+
+// --------------------------------------------------------------------------
+// App interface (detectChrome). These come from a pair of Instagram feed
+// screenshots that the void scan could say nothing useful about: one reported
+// four zeroes, the other found a 64px strip and missed the picture entirely.
+// --------------------------------------------------------------------------
+
+const UI_BG = [12, 15, 20, 255];
+const UI_INK = [235, 236, 238, 255];
+
+/**
+ * A band of interface: a flat background with writing on it. `density` is
+ * roughly the percentage of the row that is ink, kept well under the coverage
+ * threshold so the band still reads as one colour.
+ */
+function chromeBand(bg, ink, density, inset = 40) {
+  return (x, y, width) =>
+    x > inset && x < width - inset && y % 11 > 2 && (x * 7 + y * 13) % 97 < density ? ink : bg;
+}
+
+/** Busy picture content — no colour owns any row of it. */
+function picture(seedA = 53, seedB = 31) {
+  return (x, y) => [
+    40 + ((x * seedA + y * seedB) % 190),
+    30 + ((x * 17 + y * 7) % 200),
+    60 + ((x * 29 + y * 11) % 170),
+    255,
+  ];
+}
+
+/** rows() with the width handed to each painter, so bands can inset from it. */
+function screen(width, bands) {
+  return rows(width, bands.map(([h, fn]) => [h, (x, y) => fn(x, y, width)]));
+}
+
+test("a feed screenshot is cropped to the picture, not to its edges", () => {
+  // The shape that prompted all of this. Nothing here is blank: interface above
+  // the picture, interface below it, and the NEXT post already showing at the
+  // bottom edge. Scanning inward from the edges cannot touch that last part —
+  // it is real content by any measure — which is why this reads the image as
+  // blocks and keeps the largest run of picture.
+  const img = screen(800, [
+    [60, chromeBand(UI_BG, UI_INK, 6)], // status bar
+    [120, chromeBand(UI_BG, UI_INK, 14)], // nav bar
+    [140, chromeBand(UI_BG, UI_INK, 10)], // username, caption, date
+    [900, picture()], // the picture
+    [200, chromeBand(UI_BG, UI_INK, 12)], // likes, caption
+    [160, chromeBand(UI_BG, UI_INK, 8)], // date, next account row
+    [300, picture(41, 19)], // the next post, at the bottom edge
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 320, `top=${r.top}`);
+  assert.equal(r.bottom, 660, `bottom=${r.bottom}: the next post was left attached`);
+  assert.deepEqual(r.crop, { x: 0, y: 320, width: 800, height: 900 });
+  assert.equal(r.sides.top.hex, "#0C0F14", "reports the interface colour it trimmed");
+  assert.equal(r.chrome, true);
+});
+
+test("interface detection works in light mode too", () => {
+  // Ink is an absolute distance from the background, so dark-on-white is the
+  // same problem as white-on-dark.
+  const PAPER = [250, 250, 249, 255];
+  const TEXT = [24, 24, 27, 255];
+  const img = screen(700, [
+    [260, chromeBand(PAPER, TEXT, 12)],
+    [800, picture()],
+    [240, chromeBand(PAPER, TEXT, 10)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 260);
+  assert.equal(r.bottom, 240);
+  assert.equal(r.sides.top.name, "white");
+});
+
+test("a flat sky is not mistaken for interface", () => {
+  // THE test. A gradient sky owns its rows just as completely as a nav bar
+  // does, so coverage alone would crop it off and destroy the photo. The
+  // difference is ink: interface has writing on it, sky does not.
+  const img = rows(500, [
+    [400, (x, y) => { const v = 150 + Math.round(y * 0.12); return [v - 40, v - 10, v + 40, 255]; }],
+    [500, picture(61, 23)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 0, `top=${r.top}: cropped 400px of sky off a photograph`);
+  assert.equal(r.hasVoid, false);
+});
+
+test("a plain studio backdrop is not mistaken for interface either", () => {
+  const img = rows(500, [
+    [300, () => [232, 231, 229, 255]],
+    [400, picture()],
+    [300, () => [232, 231, 229, 255]],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 0);
+  assert.equal(r.bottom, 0);
+});
+
+test("a letterbox bar is a void, not interface — the two detectors divide the work", () => {
+  // Black bars carry no ink, so interface mode correctly declines and leaves
+  // them to the void scan. The modes are complementary, not competing.
+  const img = rows(400, [[200, () => [0, 0, 0, 255]], [500, picture()], [200, () => [0, 0, 0, 255]]]);
+  assert.equal(detectChrome(img).hasVoid, false, "interface mode declines a plain black bar");
+  const v = detectVoidsAuto(img);
+  assert.equal(v.top, 200, "and the void scan still gets it");
+  assert.equal(v.bottom, 200);
+});
+
+test("interface detection never invents a crop on a full-bleed photo", () => {
+  const r = detectChrome(makeImage({ width: 400, height: 700 }));
+  assert.equal(r.hasVoid, false);
+  assert.equal(r.allChrome, false);
+  assert.deepEqual(r.crop, { x: 0, y: 0, width: 400, height: 700 });
+});
+
+test("a wide button does not split the interface band around it", () => {
+  // A Follow button spans far too much of its rows for them to read as one
+  // colour, so without bridging the nav bar splits into three and the button's
+  // rows become a "picture" wedged inside the interface.
+  const BUTTON = [80, 84, 92, 255];
+  const nav = chromeBand(UI_BG, UI_INK, 10);
+  const img = screen(800, [
+    [280, nav],
+    [40, (x, y, w) => (x > w * 0.3 && x < w * 0.9 ? BUTTON : nav(x, y, w))],
+    [280, nav],
+    [1000, picture()],
+    [800, nav],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 600, `top=${r.top}: the interface band was split at the button`);
+  assert.equal(r.crop.height, 1000);
+});
+
+test("a captioned meme is not split at its caption bar", () => {
+  // The mirror image: a flat, inked strip lying across the middle of the
+  // picture. Left alone it splits the picture in two and the crop keeps
+  // whichever half is bigger, throwing away the other.
+  const CAPTION = [250, 250, 250, 255];
+  const img = screen(800, [
+    [400, chromeBand(UI_BG, UI_INK, 12)],
+    [420, picture()],
+    [50, chromeBand(CAPTION, [20, 20, 20, 255], 14)], // white caption bar, black text
+    [430, picture(29, 47)],
+    [400, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 400, `top=${r.top}`);
+  assert.equal(r.crop.height, 900, `height=${r.crop.height}: the caption bar split the picture`);
+});
+
+test("columns are measured across the surviving rows only", () => {
+  // Same ordering rule as the void scan, for the same reason: a full-width nav
+  // bar starts every column with interface colour, so measuring columns first
+  // would read the entire image as chrome.
+  //
+  // Sidebars either side of the picture — the wide-screen layout, where the
+  // interface is beside the content as well as above and below it.
+  const rail = (x0, x1) => (x, y) =>
+    x > x0 + 15 && x < x1 - 15 && x % 9 > 2 && (x * 7 + y * 13) % 97 < 12 ? UI_INK : UI_BG;
+  const left = rail(0, 150);
+  const right = rail(800, 900);
+  const img = screen(900, [
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+    [800, (x, y, w) => (x < 150 ? left(x, y) : x >= w - 100 ? right(x, y) : picture()(x, y))],
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 300);
+  assert.equal(r.bottom, 300);
+  assert.equal(r.left, 150, `left=${r.left}`);
+  assert.equal(r.right, 100, `right=${r.right}`);
+  assert.deepEqual(r.crop, { x: 150, y: 300, width: 650, height: 800 });
+});
+
+test("bare bars beside a picture are voids, not interface", () => {
+  // The counterpart to the test above, and a deliberate limit. Side bars with
+  // nothing written on them carry no ink, so interface mode leaves them alone
+  // — they are exactly what the void scan is for. Same rule as the sky: what
+  // makes a band interface is that it has writing on it.
+  const img = screen(900, [
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+    [800, (x, y, w) => (x < 150 || x >= w - 100 ? UI_BG : picture()(x, y))],
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 300, "the inked bands above and below still go");
+  assert.equal(r.left, 0, `left=${r.left}`);
+  assert.equal(r.right, 0, `right=${r.right}`);
+});
+
+test("an all-interface screenshot is flagged rather than cropped to a gap", () => {
+  // A settings page or a chat: there is no picture in it, so there is nothing
+  // to crop TO. Saying so beats cropping to whatever 40px gap was largest.
+  const img = screen(600, [[1200, chromeBand(UI_BG, UI_INK, 12)]]);
+  const r = detectChrome(img);
+  assert.equal(r.allChrome, true);
+  assert.equal(r.hasVoid, false);
+  assert.deepEqual(r.crop, { x: 0, y: 0, width: 600, height: 1200 });
+});
+
+test("a picture too small to be the subject is not cropped to", () => {
+  // 8% of the image. Below minBlock, so this reports nothing rather than
+  // cropping a tall screenshot down to one thumbnail inside it.
+  const img = screen(600, [
+    [900, chromeBand(UI_BG, UI_INK, 12)],
+    [160, picture()],
+    [940, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  assert.equal(detectChrome(img).hasVoid, false);
+});
+
+test("detectChrome returns the same shape detectVoids does", () => {
+  // The UI and the crop path consume either without knowing which ran.
+  const img = screen(400, [
+    [200, chromeBand(UI_BG, UI_INK, 12)],
+    [600, picture()],
+    [200, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const chrome = detectChrome(img);
+  const voids = detectVoids(img);
+  for (const key of ["width", "height", "top", "bottom", "left", "right", "sides", "crop", "blankImage", "hasVoid", "rotated"]) {
+    assert.ok(key in chrome, `missing ${key}`);
+  }
+  assert.deepEqual(Object.keys(chrome.sides).sort(), Object.keys(voids.sides).sort());
+  for (const side of ["top", "bottom", "left", "right"]) {
+    assert.deepEqual(Object.keys(chrome.sides[side]).sort(), Object.keys(voids.sides[side]).sort());
+  }
 });

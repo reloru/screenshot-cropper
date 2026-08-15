@@ -285,6 +285,107 @@ try {
       : bad(`clipboard type was ${copied && copied.type}`);
   }
 
+  // --- App interface mode ---------------------------------------------------
+  // A feed screenshot: nothing in it is blank, so the void scan has nothing to
+  // say. The picture is in the MIDDLE, with interface above it, interface below
+  // it, and the next post already showing at the bottom edge.
+  await page.click("#reset");
+  await page.waitForFunction(() => document.getElementById("work").hidden, null, { timeout: 5000 });
+
+  const fw = 800;
+  const feedBands = [
+    [320, "chrome"], // status bar, nav bar, username, caption
+    [900, "picture"],
+    [360, "chrome"], // likes, caption, date, next account row
+    [300, "picture"], // the next post, running off the bottom edge
+  ];
+  const fh = feedBands.reduce((n, [h]) => n + h, 0);
+  const feed = new Uint8ClampedArray(fw * fh * 4);
+  let fy = 0;
+  for (const [h, kind] of feedBands) {
+    for (let y = fy; y < fy + h; y++) {
+      for (let x = 0; x < fw; x++) {
+        const o = (y * fw + x) * 4;
+        let px;
+        if (kind === "chrome") {
+          // Flat #0C0F14 with sparse high-contrast glyphs on it. The text runs
+          // are 24 rows deep on a 30-row pitch, like real lines of type — that
+          // matters, because runs shorter than the void scan's 18-row grace
+          // window let it walk straight through the band and call it blank.
+          const inked = x > 40 && x < fw - 40 && y % 30 < 24 && (x * 7 + y * 13) % 97 < 11;
+          px = inked ? [235, 236, 238] : [12, 15, 20];
+        } else {
+          px = [40 + ((x * 53 + y * 31) % 190), 30 + ((x * 17 + y * 7) % 200), 60 + ((x * 29 + y * 11) % 170)];
+        }
+        feed[o] = px[0];
+        feed[o + 1] = px[1];
+        feed[o + 2] = px[2];
+        feed[o + 3] = 255;
+      }
+    }
+    fy += h;
+  }
+  await page.setInputFiles("#file", {
+    name: "feed.png",
+    mimeType: "image/png",
+    buffer: encodePng({ data: feed, width: fw, height: fh }),
+  });
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 20_000 });
+
+  // Blank-edges mode is still the default and correctly finds nothing here.
+  eq(Number(await page.inputValue("#px-top")), 0, "blank-edges mode finds no void in a feed screenshot");
+  eq(await page.isVisible("#offer"), true, "and offers the interface crop instead");
+
+  await page.click("#offer-go");
+  await page.waitForFunction(
+    () => document.getElementById("panel-title").textContent.includes("interface"),
+    null,
+    { timeout: 5000 },
+  );
+  eq(Number(await page.inputValue("#px-top")), 320, "interface above the picture measured");
+  eq(
+    Number(await page.inputValue("#px-bottom")),
+    660,
+    "interface below it AND the next post trimmed — an edge scan cannot do this",
+  );
+  eq(await page.isVisible("#strictness"), false, "strictness is hidden — interface mode has no tolerance dial");
+  eq(await page.isVisible("#offer"), false, "the offer goes away once taken");
+
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 20_000 });
+  const [feedDl] = await Promise.all([
+    page.waitForEvent("download", { timeout: 15_000 }),
+    page.click("#save"),
+  ]);
+  const feedPath = join(profile, "feed-out.png");
+  await feedDl.saveAs(feedPath);
+  const feedOut = decodePng(readFileSync(feedPath));
+  eq(feedOut.width, 800, "saved interface crop width");
+  eq(feedOut.height, 900, "saved interface crop height");
+  // The proof: no row of the result is dominated by one colour the way an
+  // interface row is.
+  let flattest = 0;
+  for (const y of [0, 1, feedOut.height - 2, feedOut.height - 1]) {
+    const bins = new Map();
+    for (let x = 0; x < feedOut.width; x++) {
+      const o = (y * feedOut.width + x) * 4;
+      const k = ((feedOut.data[o] >> 3) << 10) | ((feedOut.data[o + 1] >> 3) << 5) | (feedOut.data[o + 2] >> 3);
+      bins.set(k, (bins.get(k) || 0) + 1);
+    }
+    flattest = Math.max(flattest, Math.max(...bins.values()) / feedOut.width);
+  }
+  flattest < 0.5
+    ? ok("the interface bands are gone from the saved image")
+    : bad(`a saved edge row is ${(flattest * 100).toFixed(0)}% one colour — interface survived the crop`);
+
+  // Scoped to the editor: the batch panel carries its own copy of these pills.
+  await page.click('#work [data-mode="void"]');
+  await page.waitForFunction(
+    () => !document.getElementById("panel-title").textContent.includes("interface"),
+    null,
+    { timeout: 5000 },
+  );
+  eq(await page.isVisible("#strictness"), true, "strictness comes back in blank-edges mode");
+
   // --- Batch mode ----------------------------------------------------------
   await page.click("#reset");
   await page.waitForFunction(() => document.getElementById("pick").hidden === false, null, { timeout: 5000 });
