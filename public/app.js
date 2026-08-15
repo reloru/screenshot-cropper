@@ -8,7 +8,7 @@
 // One image and many images run the same path: state.items always holds the
 // list, and a single item just opens straight into the editor.
 
-import { detectVoids, detectVoidsAuto, cropRect } from "./detect.js";
+import { detectVoids, detectVoidsAuto, detectChrome, cropRect } from "./detect.js";
 import {
   MAX_PIXELS,
   canCopyImages,
@@ -56,19 +56,35 @@ const el = {
   saveHint: document.getElementById("save-hint"),
   rowTemplate: document.getElementById("side-row"),
   batchTemplate: document.getElementById("batch-row"),
+  panelTitle: document.getElementById("panel-title"),
+  strictness: document.getElementById("strictness"),
+  offer: document.getElementById("offer"),
+  offerText: document.getElementById("offer-text"),
+  offerGo: document.getElementById("offer-go"),
   tolerance: document.querySelectorAll("[data-tolerance]"),
+  mode: document.querySelectorAll("[data-mode]"),
   format: document.querySelectorAll("[data-format]"),
   bands: {},
 };
 for (const side of SIDES) el.bands[side] = document.querySelector(`.band-${side}`);
 
 const state = {
-  items: [], // { file, name, width, height, detection, trim, use, outFile, thumbUrl, include, error }
+  items: [], // { file, name, width, height, detections, detection, trim, use, outFile, thumbUrl, include, error }
   editing: null, // index into items, or null when showing the batch list
   open: null, // { source, imageData } for the item being edited
   tolerance: "auto",
+  // "void"   — blank bands at the edges (the original behaviour)
+  // "chrome" — the app interface around a picture, which is not blank at all
+  mode: "void",
   format: "auto",
   buildId: 0,
+};
+
+// Wording that differs between the two detectors, kept in one place so the
+// heading, the batch summary and the empty states cannot drift apart.
+const MODE_COPY = {
+  void: { title: "Blank space found", noun: "blank space", empty: "no blank edge" },
+  chrome: { title: "App interface found", noun: "interface", empty: "no interface" },
 };
 
 const isBatch = () => state.items.length > 1;
@@ -180,12 +196,17 @@ async function processFile(file) {
     name: file.name || "screenshot",
     width: 0,
     height: 0,
+    detections: null,
     detection: null,
     trim: { top: 0, bottom: 0, left: 0, right: 0 },
     use: { top: false, bottom: false, left: false, right: false },
     transparent: false,
     outFile: null,
     thumbUrl: null,
+    // Which mode this thumbnail was rendered for. It shows the CROPPED result,
+    // so it goes stale the moment the mode changes — including for images you
+    // were not looking at when you changed it.
+    thumbMode: null,
     include: true,
     error: null,
   };
@@ -199,13 +220,15 @@ async function processFile(file) {
     item.height = height;
 
     const pixels = readPixels(source, width, height);
-    item.detection = measureWith(pixels);
-    for (const side of SIDES) {
-      item.trim[side] = item.detection[side];
-      item.use[side] = item.detection[side] > 0;
-    }
+    // Both detectors run now, while the pixels are decoded and in hand. Each is
+    // cheap next to the decode, and having both means switching modes is
+    // instant and — more usefully — that the app can tell you when the mode you
+    // are in found nothing but the other one would have.
+    item.detections = { void: measureWith(pixels), chrome: detectChrome(pixels) };
+    applyDetection(item);
     item.transparent = hasTransparency(pixels, item.detection.crop);
     item.thumbUrl = await makeThumb(source, item.detection.crop);
+    item.thumbMode = state.mode;
   } catch {
     item.error = "unreadable";
   } finally {
@@ -220,6 +243,16 @@ function measureWith(pixels) {
   return state.tolerance === "auto"
     ? detectVoidsAuto(pixels)
     : detectVoids(pixels, { tolerance: state.tolerance });
+}
+
+/** Point an item at the active detector's result and reset its trim to match. */
+function applyDetection(item) {
+  if (!item.detections) return;
+  item.detection = item.detections[state.mode];
+  for (const side of SIDES) {
+    item.trim[side] = item.detection[side];
+    item.use[side] = item.detection[side] > 0;
+  }
 }
 
 // --------------------------------------------------------------------- editor
@@ -315,7 +348,7 @@ function refresh() {
       row.color.textContent = info.name ? `${info.hex} ${info.name}` : info.hex;
     } else {
       row.swatch.hidden = true;
-      row.color.textContent = px > 0 ? "manual" : "no blank edge";
+      row.color.textContent = px > 0 ? "manual" : MODE_COPY[state.mode].empty;
     }
 
     // Offer the next solid band only while the auto value is untouched —
@@ -352,7 +385,14 @@ function refresh() {
       `<b>${(removed * 100).toFixed(1)}%</b> removed`
     : `Original <b>${item.width} × ${item.height}</b> · nothing selected to trim`;
 
-  if (det.blankImage) {
+  if (det.allChrome) {
+    // A settings page, a chat, a wall of text. There is nothing in it to crop
+    // TO, which is a different answer from "this already fills the frame".
+    showWarning(
+      "This is nearly all interface — there's no picture in it big enough to crop to. " +
+        "Try <b>Blank edges</b> instead, or type your own numbers.",
+    );
+  } else if (det.blankImage) {
     showWarning("This image is blank edge to edge, so there's nothing to crop out of it.");
   } else if (det.rotated) {
     // Straightened photos have blank *triangles* in the corners, so no whole row
@@ -361,6 +401,11 @@ function refresh() {
     showWarning(
       "This looks like a straightened or rotated photo — the blank areas are triangles in the corners, " +
         "not bands along the edges, so there's no rectangle to trim off. You can still type in your own numbers to crop it manually.",
+    );
+  } else if (!det.hasVoid && state.mode === "chrome") {
+    showWarning(
+      "No app interface found around a picture here. That's the right answer for an ordinary photo — " +
+        "try <b>Blank edges</b>, or type your own numbers.",
     );
   } else if (!det.hasVoid) {
     showWarning(
@@ -376,7 +421,36 @@ function refresh() {
     el.warning.hidden = true;
   }
 
+  updateOffer(item);
   scheduleBuild();
+}
+
+// Point at the other detector when it would take substantially more off.
+//
+// Keyed on how much more, not on "this mode found nothing", because the near
+// miss is the case that matters. One of the two screenshots this was built from
+// has a 64px black strip above its status bar: the void scan dutifully finds
+// it, reports a 2% trim, and never mentions that the picture in the middle is a
+// 42% trim away. "Found nothing" would not have fired there.
+const OFFER_GAIN = 0.1;
+
+function updateOffer(item) {
+  const otherMode = state.mode === "void" ? "chrome" : "void";
+  const other = item.detections && item.detections[otherMode];
+  const area = item.width * item.height;
+  const mine = rectFor(item);
+  const gain = other ? (mine.width * mine.height - other.crop.width * other.crop.height) / area : 0;
+
+  el.offer.hidden = gain < OFFER_GAIN;
+  if (el.offer.hidden) return;
+  const size = `${other.crop.width} × ${other.crop.height}`;
+  const now = `${mine.width} × ${mine.height}`;
+  el.offerText.textContent =
+    otherMode === "chrome"
+      ? `There's a picture inside the interface — trimming to it leaves ${size} instead of ${now}.`
+      : `There's blank space around the edges — trimming it leaves ${size} instead of ${now}.`;
+  el.offerGo.textContent = otherMode === "chrome" ? "Trim to the picture" : "Trim the blank edges";
+  el.offerGo.dataset.go = otherMode;
 }
 
 // ----------------------------------------------------------------- batch view
@@ -384,6 +458,12 @@ function refresh() {
 function showBatch() {
   el.batch.hidden = false;
   el.work.hidden = true;
+  // Thumbnails built for the other mode have to be rebuilt from the files
+  // before the list means anything. refreshThumbs() calls back in here.
+  if (state.items.some((item) => item.thumbMode !== state.mode)) {
+    refreshThumbs();
+    return;
+  }
   el.batchTitle.textContent = `${state.items.length} images`;
   el.batchList.replaceChildren();
 
@@ -428,7 +508,7 @@ function updateBatchSummary() {
   const trimmed = included.filter((i) => SIDES.some((s) => effective(i, s) > 0));
   el.batchSummary.innerHTML =
     `<b>${included.length}</b> of ${state.items.length} selected · ` +
-    `<b>${trimmed.length}</b> had blank space to remove`;
+    `<b>${trimmed.length}</b> had ${MODE_COPY[state.mode].noun} to remove`;
 }
 
 function showWarning(html) {
@@ -608,6 +688,7 @@ function clearAll() {
   el.save.textContent = "Save";
   el.copy.hidden = true;
   el.warning.hidden = true;
+  el.offer.hidden = true;
   el.saveHint.textContent = "";
   hidePickError();
 }
@@ -625,15 +706,70 @@ for (const button of el.tolerance) {
     // have unless you open them.
     const item = current();
     if (item && state.open) {
-      item.detection = measureWith(state.open.imageData);
-      for (const side of SIDES) {
-        item.trim[side] = item.detection[side];
-        item.use[side] = item.detection[side] > 0;
-      }
+      item.detections.void = measureWith(state.open.imageData);
+      applyDetection(item);
       refresh();
     }
   });
 }
+
+// Strictness is a property of the void scan — it sweeps tolerances looking for
+// a flat band. Interface detection has no such dial (it keys off how much of a
+// line is one colour and whether there is writing on it), so the control is
+// hidden rather than left there doing nothing.
+function setMode(mode) {
+  if (state.mode === mode) return;
+  state.mode = mode;
+  for (const button of el.mode) {
+    button.setAttribute("aria-checked", String(button.dataset.mode === mode));
+  }
+  el.panelTitle.textContent = MODE_COPY[mode].title;
+  el.strictness.hidden = mode !== "void";
+
+  for (const item of state.items) applyDetection(item);
+  if (state.editing !== null) {
+    // The batch rows behind the editor are now stale; showBatch() rebuilds them
+    // when you go back.
+    refresh();
+  } else {
+    refreshThumbs();
+  }
+}
+
+async function refreshThumbs() {
+  el.progress.hidden = false;
+  el.progressText.textContent = "Re-measuring…";
+  for (let i = 0; i < state.items.length; i++) {
+    const item = state.items[i];
+    el.progressBar.style.width = `${Math.round((i / state.items.length) * 100)}%`;
+    await new Promise((r) => setTimeout(r, 0));
+    let source = null;
+    try {
+      source = await decodeImage(item.file);
+      const url = await makeThumb(source, rectFor(item));
+      if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
+      item.thumbUrl = url;
+    } catch {
+      // Keep the stale thumbnail rather than blanking the row; the numbers
+      // beside it are rebuilt from the detection either way.
+    } finally {
+      releaseSource(source);
+      // Marked done even on failure: a decode that failed here will fail again,
+      // and showBatch() would otherwise keep asking for another refresh.
+      item.thumbMode = state.mode;
+    }
+  }
+  el.progress.hidden = true;
+  el.progressBar.style.width = "0%";
+  showBatch();
+  scheduleBuild();
+}
+
+for (const button of el.mode) {
+  button.addEventListener("click", () => setMode(button.dataset.mode));
+}
+
+el.offerGo.addEventListener("click", () => setMode(el.offerGo.dataset.go));
 
 for (const button of el.format) {
   button.addEventListener("click", () => {

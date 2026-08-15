@@ -5,6 +5,11 @@ frame, white margins above and below page content, a solid status-bar strip.
 This measures those blank bands exactly, tells you how big they are, and crops
 them off.
 
+Some screenshots have no blank space at all — a screenshot of a feed is a status
+bar, a nav bar, a username, the picture, a row of icons, a caption, and the top
+of the *next* post. None of it is blank. There's a second detector for those:
+it finds the picture inside the interface and trims to it.
+
 **Everything runs in the browser.** The image is read, measured, cropped, and
 handed to the share sheet without ever leaving the device. There is no upload,
 no storage, and no cache — the Worker serves a `Content-Security-Policy` with
@@ -21,6 +26,9 @@ That's enforced by the browser, not just promised here.
 3. **Choose what to trim** — every side has a checkbox and an editable pixel
    value, so you can drop one bar and keep another, or type your own number.
    Shaded overlays on the preview show exactly what's going.
+   **Blank edges / App interface** switches which detector drives those numbers;
+   if the other one would take substantially more off, the page says so and
+   offers to switch.
 4. **Save** — opens the phone's native share sheet, where **Save Image** puts it
    in Photos and **Save to Files** puts it wherever you like. Browsers without
    file sharing (most desktops) download instead. **Copy** puts a single
@@ -113,6 +121,57 @@ since without one there is no void colour to solve against.
 
 Exact / Normal / Loose remain as manual overrides.
 
+### App interface
+
+The void scan above is an edge scan: it walks inward from each side counting
+blank lines. A feed screenshot defeats it twice over. Nothing in one is blank,
+so it reports four zeroes — and of the two that prompted this, one had flat
+enough corners to come back "looks like a straightened photo," which is worse
+than nothing. Even a perfect edge scan could not finish the job, because the
+thing you want is in the **middle**: the next post is already showing at the
+bottom of the frame, and it is real content by any measure.
+
+So this detector reads the image as horizontal **blocks** rather than scanning
+in from the edges, classifies each one, and keeps the largest run of picture.
+Everything above and below it becomes the trim.
+
+- **A line is interface if one colour owns it.** Not "is it flat" — a nav bar
+  has a Follow button on it and a caption row is full of text. The measure is
+  the share of the line within 10 of its most common colour. Measured on the two
+  reference screenshots, picture rows topped out at 0.48 (a meme's white caption
+  text) and interface rows bottomed out at 0.65, so the threshold sits at 0.7
+  with room either side. The dominant colour comes from a coarse histogram, not
+  a median, because an interface line is bimodal — background plus text — and
+  the median of a busy nav bar is not its background.
+- **What makes it interface rather than sky is the writing on it.** This is the
+  guard that matters, and without it the rule above is dangerous: a clear sky or
+  a studio backdrop owns its rows just as completely as a status bar does, and
+  "crop to the largest run of picture" would cheerfully delete it. So a band
+  also has to carry **ink** — pixels more than 60 from the background — across
+  at least 15% of its rows. Every genuine band in the reference pair scored
+  0.24–0.87. The one impostor, a blurred strip of the previous post's photo
+  sitting behind the status bar, scored 0.11 and drifted 177 in colour where
+  real interface drifts 3.
+- **Short runs get absorbed, in both directions.** A profile picture is a circle
+  wide enough to stop its rows reading as one colour, which would split one
+  chrome band into three. A meme with a caption bar across it has the mirror
+  problem — a flat inked strip that would split the picture in two and leave the
+  crop on whichever half was bigger. Anything under 3% of the axis (floored at
+  24 lines) is closed up.
+- **Rows first, then columns across only the surviving rows** — same ordering as
+  the void scan, same reason. A full-width nav bar starts every column with
+  interface colour, so measuring columns first reads the whole image as chrome.
+- **The picture has to be at least 15% of the image.** Otherwise an
+  all-interface screenshot — a settings page, a chat — would "crop to" whatever
+  40-pixel gap happened to be the largest. It says so instead.
+
+The two detectors divide the work rather than competing, and the split falls out
+of the ink rule: a plain black letterbox bar has nothing written on it, so
+interface mode declines it and the void scan takes it. Bare bars beside a
+picture are left alone for the same reason. There is no strictness control here
+— nothing in it is a tolerance sweep — so that control is hidden rather than
+left sitting there doing nothing.
+
 **Straightened photos are out of scope by construction.** If you rotate a photo,
 the black fills the *corners* as triangles — no whole row or column is ever
 blank, so there is no rectangle to trim. The app detects that shape and says so
@@ -133,13 +192,17 @@ npm run deploy     # wrangler deploy
   synthetic images built by `scripts/png.mjs` (a dependency-free PNG codec used
   only by tests): per-edge bands, the rows-before-columns ordering, the noise
   budget, tolerance behavior, transparent borders, an all-blank image, and the
-  clamping of hand-entered overrides.
+  clamping of hand-entered overrides. The interface tests carry their own
+  counter-cases — a gradient sky, a studio backdrop, a letterbox bar — because
+  the failure that would matter there is not "missed a band" but "deleted a
+  photograph".
 - `NODE_PATH=/opt/node22/lib/node_modules node scripts/test-e2e.mjs` — the same
   thing in a real browser: boots `wrangler dev`, uploads a fixture PNG with
   known bands, asserts the on-screen numbers, exercises the checkboxes and the
   manual override, then saves the file and decodes it to confirm the output
-  dimensions and that the bands are actually gone. Also checks the security
-  headers. Needs Playwright + Chromium available.
+  dimensions and that the bands are actually gone. Does the same for a synthetic
+  feed screenshot through the interface detector, including the offer to switch
+  modes. Also checks the security headers. Needs Playwright + Chromium available.
 
 **One thing no test can cover: the share sheet itself.** `navigator.share()`
 requires a real device and a real user tap, so after deploying, open the site on
@@ -154,6 +217,10 @@ public/          the entire app — served as static assets, no build step
   app.css
   app.js         UI wiring (ES module)
   detect.js      pure measurement logic, imported by the app AND the tests
+                 detectVoidsAuto() — blank bands at the edges
+                 detectChrome()    — the picture inside an app's interface
+                 both return the same shape, so the UI and the crop path
+                 consume either without knowing which ran
 src/worker.js    serves public/ and stamps the security headers
 wrangler.jsonc   run_worker_first: true, so the Worker sees every request
 ```
