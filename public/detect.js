@@ -477,6 +477,16 @@ export const CHROME_DEFAULTS = {
   // from: picture rows peaked at 0.48 (a meme's white caption text) and chrome
   // rows bottomed out at 0.65, so the gap is wide and 0.7 sits inside it.
   coverage: 0.7,
+  // Share of the line's own-colour pixels that are EXACTLY equal to the pixel
+  // before them. THIS IS THE GUARD THAT MATTERS, and coverage alone is
+  // dangerous without it: a dim photograph is flat by the coverage measure —
+  // the dark half of a bar photo held 0.9 of its rows within 10 of one value —
+  // so "crop to the largest run of picture" ate 374px off the top of the
+  // picture it was supposed to be keeping. A rendered background is one value
+  // repeated, so consecutive pixels are identical (0.97-1.00 measured across
+  // every genuine band). A photographed one carries sensor noise at every
+  // pixel and scores 0.05-0.30 no matter how dim and smooth it looks.
+  evenness: 0.65,
   // A pixel this far from the dominant colour is "ink" — text, an icon, an
   // avatar. Deliberately a big number: ink is high-contrast by design, because
   // it exists to be read.
@@ -484,18 +494,22 @@ export const CHROME_DEFAULTS = {
   // Ink covering this much of a line makes it an inked line. 0.5% of 1290px is
   // ~6 pixels, which is a glyph or two.
   inkRow: 0.005,
-  // ...and a band must be inked over this fraction of its rows to be interface
-  // at all. THIS IS THE GUARD THAT MATTERS. Without it any flat region of a
-  // real photo — a clear sky, a studio backdrop — is "chrome" and gets cropped
-  // off. Interface has writing on it; sky does not. Every genuine band in the
-  // reference screenshots scored 0.24-0.87 and the one impostor (a blurred
-  // photo strip behind the status bar) scored 0.11.
-  inkBand: 0.15,
-  // How far a band's background may wander before it stops being one band. A
-  // rendered background barely moves; the widest genuine drift measured was 31,
-  // where a circular avatar pulled the dominant colour of its rows. The blurred
-  // impostor above drifted 177.
-  drift: 48,
+  // How many inked lines a band needs before the whole band counts as
+  // interface. An absolute count, not a fraction: interface is mostly EMPTY.
+  // The band above the photo in a Facebook post is 700px of plain black
+  // padding with one 60px row of icons in it, and asking for ink across a
+  // fraction of the band scored that 0.09 and reported "no interface" over an
+  // obvious app header. What matters is that writing is present, not how much
+  // of the band it fills — so the padding rides along with the row that
+  // identifies it.
+  bandInk: 8,
+  // How close a blank band's colour has to be to a colour the interface uses
+  // before the band counts as app background too. See bandTrim(). Looser than
+  // `tolerance` because it answers a coarser question — not "is this pixel part
+  // of this line's colour" but "are these the same surface" — and an app
+  // routinely paints those in two near-blacks: Instagram's chrome is #0C0F14
+  // and the pillarbox around its media is #000000, a distance of 20.
+  family: 24,
   // The picture has to be at least this much of the image. Stops an all-
   // interface screenshot (a settings page, a chat) from "cropping to" whatever
   // 40-pixel gap happened to be the largest.
@@ -522,9 +536,16 @@ const CHROME_SAMPLES = 512;
 const HIST = new Int32Array(1 << 15); // 32 levels per channel
 const TOUCHED = new Int32Array(CHROME_SAMPLES);
 
+// Evenness is measured in this many slices across the line and the worst slice
+// is the line's score. A slice needs this many of the line's own pixels side by
+// side before its score counts at all — a slice that is all text, or all some
+// other element, has nothing to say about the background.
+const SEGMENTS = 8;
+const MIN_SEGMENT_PAIRS = 8;
+
 /**
- * Measure one line: which colour owns it, how much of it that colour owns, and
- * how much of it is ink.
+ * Measure one line: which colour owns it, how much of it that colour owns, how
+ * much of it is ink, and whether that colour is PAINTED or PHOTOGRAPHED.
  *
  * The dominant colour comes from a coarse histogram rather than a median,
  * because a chrome line is bimodal — background plus text — and the median of a
@@ -532,6 +553,11 @@ const TOUCHED = new Int32Array(CHROME_SAMPLES);
  * winning bin, and coverage is counted by tolerance around that mean rather
  * than by bin membership, so a background sitting astride a bin boundary still
  * reads as one colour.
+ *
+ * `even` is the painted-vs-photographed test: of the consecutive pairs where
+ * both pixels are the line's own colour, how many are byte-for-byte identical.
+ * Ink is excluded from it by construction — only owned pairs are counted — so
+ * a busy nav bar scores as high as an empty one.
  *
  * @param {number} base   byte offset of the line's first pixel
  * @param {number} stride bytes between consecutive pixels (4 along a row,
@@ -577,19 +603,91 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
 
   let owned = 0;
   let ink = 0;
+  let pairs = 0;
+  let same = 0;
+  let wasOwned = false;
+  let first = true;
+  let pr = 0;
+  let pg = 0;
+  let pb = 0;
+  // Evenness is scored per SEGMENT and the worst one wins, because a line can
+  // be painted in one place and photographed in another. A night-time video
+  // pillarboxed in black is the case that forced this: each row is a quarter
+  // pure black, which is perfectly even, and the black pads the score enough to
+  // carry the noisy video between the pillars over the line. Segment it and the
+  // pillars score 1.00, the video scores 0.14, and the row is a picture.
+  const segLen = Math.max(1, Math.ceil(n / SEGMENTS));
+  let segPairs = 0;
+  let segSame = 0;
+  let segAll = 0;
+  let segAllSame = 0;
+  let segLeft = segLen;
+  let judged = 0;
+  let worst = 1;
+  const closeSegment = () => {
+    let score = -1;
+    if (segPairs >= MIN_SEGMENT_PAIRS) score = segSame / segPairs;
+    else if (segAll >= MIN_SEGMENT_PAIRS) {
+      // A whole slice with none of the LINE's colour in it. Skipping it scored
+      // a row that was 70% pillarbox and 30% video a perfect 1.00 off the
+      // pillars alone, so it has to be judged — but on whether the slice itself
+      // is painted, not on a colour it was never going to have. A status bar's
+      // dynamic island and a solid Follow button are as painted as the bar they
+      // sit on; the video between two pillars is not.
+      score = segAllSame / segAll;
+    }
+    if (score >= 0) {
+      judged++;
+      if (score < worst) worst = score;
+    }
+    segPairs = 0;
+    segSame = 0;
+    segAll = 0;
+    segAllSame = 0;
+    segLeft = segLen;
+  };
   for (let o = base; o < end; o += jump) {
-    let d = Math.abs(data[o] - rr);
-    const dg = Math.abs(data[o + 1] - rg);
+    const cr = data[o];
+    const cg = data[o + 1];
+    const cb = data[o + 2];
+    let d = Math.abs(cr - rr);
+    const dg = Math.abs(cg - rg);
     if (dg > d) d = dg;
-    const db = Math.abs(data[o + 2] - rb);
+    const db = Math.abs(cb - rb);
     if (db > d) d = db;
     const da = Math.abs(data[o + 3] - ra);
     if (da > d) d = da;
-    if (d <= tolerance) owned++;
-    else if (d > contrast) ink++;
+    const isOwn = d <= tolerance;
+    const alike = cr === pr && cg === pg && cb === pb;
+    if (first) first = false;
+    else {
+      segAll++;
+      if (alike) segAllSame++;
+    }
+    if (isOwn) {
+      owned++;
+      if (wasOwned) {
+        pairs++;
+        segPairs++;
+        if (alike) {
+          same++;
+          segSame++;
+        }
+      }
+    } else if (d > contrast) ink++;
+    wasOwned = isOwn;
+    pr = cr;
+    pg = cg;
+    pb = cb;
+    if (--segLeft === 0) closeSegment();
   }
+  closeSegment();
   return {
     cover: owned / n,
+    // Too little of the line was its own colour to segment — fall back to the
+    // whole-line ratio, and to 0 if no two of its own pixels ever landed side
+    // by side, which is itself a photograph's signature.
+    even: judged > 0 ? worst : pairs > 0 ? same / pairs : 0,
     ink: ink / n,
     r: Math.round(rr),
     g: Math.round(rg),
@@ -598,35 +696,38 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
   };
 }
 
+// Every line is one of three things, and the middle one is why the first
+// version of this got two of seven real screenshots wrong.
+//
+//   PICTURE — no colour owns it, or the colour that does is photographed
+//             rather than painted. This is the only kind worth keeping.
+//   CHROME  — a painted background with writing on it. Interface, for certain.
+//   BLANK   — a painted background with nothing on it: the padding inside an
+//             app header, the gap between two toolbars, the strip under a
+//             browser bar, the pillarbox beside a vertical video.
+//
+// BLANK is deliberately neither. Treating it as picture is what left a whole
+// Safari toolbar attached to a crop (a white gap above the toolbar broke the
+// band in two, and the half touching the edge "was content"). Treating it as
+// interface would crop the sky off a photograph. So it is inert: it cannot
+// anchor a crop, and it cannot break a band either.
+const PICTURE = 0;
+const BLANK = 1;
+const CHROME = 2;
+
+function classify(p, opts) {
+  if (!p || p.cover < opts.coverage || p.even < opts.evenness) return PICTURE;
+  return p.ink >= opts.inkRow ? CHROME : BLANK;
+}
+
 function mergeRuns(runs) {
   const out = [];
   for (const run of runs) {
     const last = out[out.length - 1];
-    if (last && last.chrome === run.chrome) last.b = run.b;
+    if (last && last.picture === run.picture) last.b = run.b;
     else out.push({ ...run });
   }
   return out;
-}
-
-// Is this run of flat lines actually interface, or just a smooth part of a
-// photograph? Interface carries ink and holds one colour; a gradient sky
-// carries neither.
-function isChrome(profiles, a, b, opts) {
-  let inked = 0;
-  let loR = 255, loG = 255, loB = 255;
-  let hiR = 0, hiG = 0, hiB = 0;
-  for (let i = a; i < b; i++) {
-    const p = profiles[i];
-    if (p.ink >= opts.inkRow) inked++;
-    if (p.r < loR) loR = p.r;
-    if (p.r > hiR) hiR = p.r;
-    if (p.g < loG) loG = p.g;
-    if (p.g > hiG) hiG = p.g;
-    if (p.b < loB) loB = p.b;
-    if (p.b > hiB) hiB = p.b;
-  }
-  const drift = Math.max(hiR - loR, hiG - loG, hiB - loB);
-  return inked / (b - a) >= opts.inkBand && drift <= opts.drift;
 }
 
 // Absorb runs shorter than `minRun`, shortest first.
@@ -646,7 +747,7 @@ function bridgeRuns(input, minRun) {
       if (k < 0 || len < runs[k].b - runs[k].a) k = i;
     }
     if (k < 0) break;
-    runs[k].chrome = !runs[k].chrome;
+    runs[k].picture = !runs[k].picture;
     // Flipping always merges with at least one neighbour, so this shrinks the
     // list every pass and cannot spin.
     runs = mergeRuns(runs);
@@ -655,55 +756,102 @@ function bridgeRuns(input, minRun) {
 }
 
 /**
- * Split one axis into interface and picture blocks and return the largest run
- * of picture, as `{a, b, before, after}` where before/after are the adjacent
- * chrome bands (or null). Null when there is no qualifying block.
+ * The largest run of picture on one axis, as `{a, b}`. Null when there is none
+ * big enough to be the subject.
  */
-function contentBlock(profiles, extent, opts) {
-  if (!profiles.length) return null;
+function contentBlock(kinds, extent, opts) {
+  if (!kinds.length) return null;
 
-  // 1. Flat lines, before anything is merged: validation has to see the raw
-  //    bands. Bridging first would fold that blurred strip into the nav bar
-  //    below it and hand isChrome() a band that is half photo.
   let runs = [];
-  for (let i = 0; i < profiles.length; i++) {
-    const flat = profiles[i] !== null && profiles[i].cover >= opts.coverage;
+  for (let i = 0; i < kinds.length; i++) {
+    const picture = kinds[i] === PICTURE;
     const last = runs[runs.length - 1];
-    if (last && last.chrome === flat) last.b = i + 1;
-    else runs.push({ chrome: flat, a: i, b: i + 1 });
+    if (last && last.picture === picture) last.b = i + 1;
+    else runs.push({ picture, a: i, b: i + 1 });
   }
 
-  // 2. Demote anything flat that is not inked or does not hold its colour.
-  for (const run of runs) if (run.chrome && !isChrome(profiles, run.a, run.b, opts)) run.chrome = false;
-  runs = mergeRuns(runs);
-
-  // 3. Close the gaps in both directions. 3% of the axis, floored at 24 lines:
-  //    below that a "band" is a UI hairline, not a section.
+  // Close the gaps in both directions. 3% of the axis, floored at 24 lines:
+  // below that a "band" is a UI hairline, not a section.
   runs = bridgeRuns(runs, Math.max(24, Math.round(extent * 0.03)));
 
   let best = -1;
   for (let i = 0; i < runs.length; i++) {
-    if (runs[i].chrome) continue;
+    if (!runs[i].picture) continue;
     if (best < 0 || runs[i].b - runs[i].a > runs[best].b - runs[best].a) best = i;
   }
   if (best < 0) return null;
   const block = runs[best];
   if (block.b - block.a < extent * opts.minBlock) return null;
-  return {
-    a: block.a,
-    b: block.b,
-    before: best > 0 ? runs[best - 1] : null,
-    after: best < runs.length - 1 ? runs[best + 1] : null,
-    allChrome: false,
-  };
+  return { a: block.a, b: block.b };
 }
 
-// The colour to show for a trimmed band: the dominant colour of its middle row.
-// The row at the boundary is often a blend of the band and the picture, and the
-// row at the far edge can be a different element entirely.
-function bandRef(profiles, run) {
-  if (!run) return null;
-  const p = profiles[(run.a + run.b) >> 1];
+// The colours this image paints its interface in — the dominant colour of every
+// line that carried ink, deduplicated. Collected across both axes, and used to
+// decide whether a band with nothing written on it is app background or part of
+// the photograph. See bandTrim().
+const MAX_PALETTE = 8;
+
+function addPalette(pal, kinds, profiles, tolerance) {
+  for (let i = 0; i < kinds.length; i++) {
+    if (kinds[i] !== CHROME) continue;
+    const p = profiles[i];
+    if (pal.some((c) => nearColor(c, p, tolerance))) continue;
+    if (pal.length >= MAX_PALETTE) return pal;
+    pal.push({ r: p.r, g: p.g, b: p.b, a: p.a });
+  }
+  return pal;
+}
+
+function nearColor(a, b, tolerance) {
+  return (
+    Math.abs(a.r - b.r) <= tolerance &&
+    Math.abs(a.g - b.g) <= tolerance &&
+    Math.abs(a.b - b.b) <= tolerance
+  );
+}
+
+/**
+ * Should the band between the picture and the edge be trimmed?
+ *
+ * Two ways to qualify, and the second one is what a real screenshot needed:
+ *
+ *   It has writing in it. Ordinary interface — a status bar, a caption, a row
+ *   of icons — plus however much empty padding came with it.
+ *
+ *   It has nothing written in it, but it is painted in a colour this image
+ *   uses for interface elsewhere. The black pillarbox either side of a vertical
+ *   video in a Facebook post is the case: nothing is written on it, so on its
+ *   own it is indistinguishable from a letterbox bar, which belongs to the void
+ *   scan. But the app header above it is the same black — and a colour caught
+ *   carrying text elsewhere in the same screenshot is app background, not sky.
+ *   No interface found anywhere means an empty palette and no second chance,
+ *   which is what keeps a plain letterboxed photo out of this detector.
+ *
+ * The match runs at `family` rather than `tolerance`, because the two are
+ * rarely the SAME near-black — see the note on that setting.
+ */
+function bandTrim(kinds, profiles, a, b, pal, opts) {
+  if (b <= a) return false;
+  let inked = 0;
+  for (let i = a; i < b; i++) if (kinds[i] === CHROME) inked++;
+  if (inked >= opts.bandInk) return true;
+  if (!pal.length) return false;
+  for (let i = a; i < b; i++) {
+    if (kinds[i] === PICTURE) return false;
+    if (!pal.some((c) => nearColor(c, profiles[i], opts.family))) return false;
+  }
+  return true;
+}
+
+// The colour to show for a trimmed band. The middle INKED line, because that is
+// the interface the user is being told about; the middle line of the band as a
+// whole is often padding, and the line at the boundary is often a blend of the
+// band and the picture.
+function bandRef(kinds, profiles, a, b) {
+  if (b <= a) return null;
+  const inked = [];
+  for (let i = a; i < b; i++) if (kinds[i] === CHROME) inked.push(i);
+  const p = profiles[inked.length ? inked[inked.length >> 1] : (a + b) >> 1];
   return p ? { r: p.r, g: p.g, b: p.b, a: p.a } : null;
 }
 
@@ -730,31 +878,53 @@ export function detectChrome(image, options = {}) {
   for (let y = 0; y < height; y++) {
     rowProfiles.push(lineProfile(data, y * width * 4, 4, width, opts.tolerance, opts.contrast));
   }
-  const vertical = contentBlock(rowProfiles, height, opts);
+  const rowKinds = rowProfiles.map((p) => classify(p, opts));
+  const pal = addPalette([], rowKinds, rowProfiles, opts.tolerance);
+  const vertical = contentBlock(rowKinds, height, opts);
 
-  const top = vertical ? vertical.a : 0;
-  const bottom = vertical ? height - vertical.b : 0;
+  // The block bounds the picture; whether the band outside it actually goes is
+  // a separate question, and the answer is no for a photograph that simply has
+  // a flat top. Each side is asked independently.
+  const top =
+    vertical && bandTrim(rowKinds, rowProfiles, 0, vertical.a, pal, opts) ? vertical.a : 0;
+  const bottom =
+    vertical && bandTrim(rowKinds, rowProfiles, vertical.b, height, pal, opts)
+      ? height - vertical.b
+      : 0;
   const innerHeight = height - top - bottom;
 
   let horizontal = null;
   const colProfiles = [];
-  if (innerHeight > 0) {
+  let colKinds = [];
+  if (vertical && innerHeight > 0) {
     for (let x = 0; x < width; x++) {
       colProfiles.push(
         lineProfile(data, (top * width + x) * 4, width * 4, innerHeight, opts.tolerance, opts.contrast),
       );
     }
-    horizontal = contentBlock(colProfiles, width, opts);
+    colKinds = colProfiles.map((p) => classify(p, opts));
+    addPalette(pal, colKinds, colProfiles, opts.tolerance);
+    horizontal = contentBlock(colKinds, width, opts);
   }
-  const left = horizontal ? horizontal.a : 0;
-  const right = horizontal ? width - horizontal.b : 0;
+  const left =
+    horizontal && bandTrim(colKinds, colProfiles, 0, horizontal.a, pal, opts)
+      ? horizontal.a
+      : 0;
+  const right =
+    horizontal && bandTrim(colKinds, colProfiles, horizontal.b, width, pal, opts)
+      ? width - horizontal.b
+      : 0;
 
-  const band = (px, profiles, run) => ({ px, ref: bandRef(profiles, run), nextPx: 0 });
+  const band = (px, kinds, profiles, a, b) => ({
+    px,
+    ref: px > 0 ? bandRef(kinds, profiles, a, b) : null,
+    nextPx: 0,
+  });
   const sides = {
-    top: sideInfo(band(top, rowProfiles, vertical?.before), height),
-    bottom: sideInfo(band(bottom, rowProfiles, vertical?.after), height),
-    left: sideInfo(band(left, colProfiles, horizontal?.before), width),
-    right: sideInfo(band(right, colProfiles, horizontal?.after), width),
+    top: sideInfo(band(top, rowKinds, rowProfiles, 0, top), height),
+    bottom: sideInfo(band(bottom, rowKinds, rowProfiles, height - bottom, height), height),
+    left: sideInfo(band(left, colKinds, colProfiles, 0, left), width),
+    right: sideInfo(band(right, colKinds, colProfiles, width - right, width), width),
   };
 
   const hasVoid = top + bottom + left + right > 0;
@@ -773,7 +943,7 @@ export function detectChrome(image, options = {}) {
     chrome: true,
     // Nothing but interface: no run of picture cleared minBlock. Worth saying,
     // because it is a different answer from "this already fills the frame".
-    allChrome: !vertical && rowProfiles.some((p) => p && p.cover >= opts.coverage),
+    allChrome: !vertical && rowKinds.some((k) => k === CHROME),
   };
 }
 
