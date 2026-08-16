@@ -624,6 +624,7 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
   let segLeft = segLen;
   let judged = 0;
   let worst = 1;
+  let second = 1;
   const closeSegment = () => {
     let score = -1;
     if (segPairs >= MIN_SEGMENT_PAIRS) score = segSame / segPairs;
@@ -638,7 +639,10 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
     }
     if (score >= 0) {
       judged++;
-      if (score < worst) worst = score;
+      if (score < worst) {
+        second = worst;
+        worst = score;
+      } else if (score < second) second = score;
     }
     segPairs = 0;
     segSame = 0;
@@ -684,10 +688,18 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
   closeSegment();
   return {
     cover: owned / n,
-    // Too little of the line was its own colour to segment — fall back to the
-    // whole-line ratio, and to 0 if no two of its own pixels ever landed side
-    // by side, which is itself a photograph's signature.
-    even: judged > 0 ? worst : pairs > 0 ? same / pairs : 0,
+    // The SECOND-worst slice, not the worst. One anomalous slice is an element
+    // sitting on the bar — a row of coloured emoji in a caption, a circular
+    // profile photo on an account row — and condemning the whole line for it
+    // turned those rows into picture, which cost 252px of a crop that had been
+    // right. Two bad slices means the line is not one surface, and that is what
+    // a pillarbox always produces: it leaves the entire middle of the row
+    // unaccounted for, six slices of eight at 10% rails and still two at 35%.
+    //
+    // With nothing to compare, fall back to the whole-line ratio, and to 0 if
+    // no two of its own pixels ever landed side by side — itself a
+    // photograph's signature.
+    even: judged >= 2 ? second : judged === 1 ? worst : pairs > 0 ? same / pairs : 0,
     ink: ink / n,
     r: Math.round(rr),
     g: Math.round(rg),

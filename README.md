@@ -166,7 +166,10 @@ this works at all.
   unusual — a tall video in a squarer frame. Per slice it is 0.00 throughout. A
   slice holding none of the line's colour cannot abstain — that is how the
   pillars carried the row in the first place — so it is judged on whether it is
-  painted in its own right instead. The phone's status bar has a black pill
+  painted in its own right instead. The score taken is the SECOND worst slice,
+  not the worst: one anomalous slice is an element sitting on the bar, and a
+  caption row of coloured emoji lost 252px of a correct crop to that. A pillar
+  always leaves two or more. The phone's status bar has a black pill
   punched through the middle of it, wide enough to own a whole slice, and a nav
   bar has solid buttons on it; those are as painted as the bar they sit on. The
   video between two pillars is not, which is what tells them apart.
