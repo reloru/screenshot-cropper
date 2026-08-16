@@ -503,6 +503,13 @@ export const CHROME_DEFAULTS = {
   // of the band it fills — so the padding rides along with the row that
   // identifies it.
   bandInk: 8,
+  // How close a blank band's colour has to be to a colour the interface uses
+  // before the band counts as app background too. See bandTrim(). Looser than
+  // `tolerance` because it answers a coarser question — not "is this pixel part
+  // of this line's colour" but "are these the same surface" — and an app
+  // routinely paints those in two near-blacks: Instagram's chrome is #0C0F14
+  // and the pillarbox around its media is #000000, a distance of 20.
+  family: 24,
   // The picture has to be at least this much of the image. Stops an all-
   // interface screenshot (a settings page, a chat) from "cropping to" whatever
   // 40-pixel gap happened to be the largest.
@@ -599,6 +606,7 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
   let pairs = 0;
   let same = 0;
   let wasOwned = false;
+  let first = true;
   let pr = 0;
   let pg = 0;
   let pb = 0;
@@ -611,26 +619,31 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
   const segLen = Math.max(1, Math.ceil(n / SEGMENTS));
   let segPairs = 0;
   let segSame = 0;
-  let segSamples = 0;
+  let segAll = 0;
+  let segAllSame = 0;
   let segLeft = segLen;
   let judged = 0;
   let worst = 1;
   const closeSegment = () => {
-    if (segPairs >= MIN_SEGMENT_PAIRS) {
+    let score = -1;
+    if (segPairs >= MIN_SEGMENT_PAIRS) score = segSame / segPairs;
+    else if (segAll >= MIN_SEGMENT_PAIRS) {
+      // A whole slice with none of the LINE's colour in it. Skipping it scored
+      // a row that was 70% pillarbox and 30% video a perfect 1.00 off the
+      // pillars alone, so it has to be judged — but on whether the slice itself
+      // is painted, not on a colour it was never going to have. A status bar's
+      // dynamic island and a solid Follow button are as painted as the bar they
+      // sit on; the video between two pillars is not.
+      score = segAllSame / segAll;
+    }
+    if (score >= 0) {
       judged++;
-      const score = segSame / segPairs;
       if (score < worst) worst = score;
-    } else if (segSamples >= MIN_SEGMENT_PAIRS) {
-      // A whole slice of the line with none of its own colour in it. That is
-      // evidence against one painted surface, not an absence of evidence, and
-      // skipping it scored a row that was 70% pillarbox and 30% video a
-      // perfect 1.00 off the pillars alone.
-      judged++;
-      worst = 0;
     }
     segPairs = 0;
     segSame = 0;
-    segSamples = 0;
+    segAll = 0;
+    segAllSame = 0;
     segLeft = segLen;
   };
   for (let o = base; o < end; o += jump) {
@@ -645,13 +658,18 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
     const da = Math.abs(data[o + 3] - ra);
     if (da > d) d = da;
     const isOwn = d <= tolerance;
-    segSamples++;
+    const alike = cr === pr && cg === pg && cb === pb;
+    if (first) first = false;
+    else {
+      segAll++;
+      if (alike) segAllSame++;
+    }
     if (isOwn) {
       owned++;
       if (wasOwned) {
         pairs++;
         segPairs++;
-        if (cr === pr && cg === pg && cb === pb) {
+        if (alike) {
           same++;
           segSame++;
         }
@@ -808,6 +826,9 @@ function nearColor(a, b, tolerance) {
  *   carrying text elsewhere in the same screenshot is app background, not sky.
  *   No interface found anywhere means an empty palette and no second chance,
  *   which is what keeps a plain letterboxed photo out of this detector.
+ *
+ * The match runs at `family` rather than `tolerance`, because the two are
+ * rarely the SAME near-black — see the note on that setting.
  */
 function bandTrim(kinds, profiles, a, b, pal, opts) {
   if (b <= a) return false;
@@ -817,7 +838,7 @@ function bandTrim(kinds, profiles, a, b, pal, opts) {
   if (!pal.length) return false;
   for (let i = a; i < b; i++) {
     if (kinds[i] === PICTURE) return false;
-    if (!pal.some((c) => nearColor(c, profiles[i], opts.tolerance))) return false;
+    if (!pal.some((c) => nearColor(c, profiles[i], opts.family))) return false;
   }
   return true;
 }
@@ -864,9 +885,12 @@ export function detectChrome(image, options = {}) {
   // The block bounds the picture; whether the band outside it actually goes is
   // a separate question, and the answer is no for a photograph that simply has
   // a flat top. Each side is asked independently.
-  const top = vertical && bandTrim(rowKinds, rowProfiles, 0, vertical.a, pal, opts) ? vertical.a : 0;
+  const top =
+    vertical && bandTrim(rowKinds, rowProfiles, 0, vertical.a, pal, opts) ? vertical.a : 0;
   const bottom =
-    vertical && bandTrim(rowKinds, rowProfiles, vertical.b, height, pal, opts) ? height - vertical.b : 0;
+    vertical && bandTrim(rowKinds, rowProfiles, vertical.b, height, pal, opts)
+      ? height - vertical.b
+      : 0;
   const innerHeight = height - top - bottom;
 
   let horizontal = null;
@@ -882,9 +906,14 @@ export function detectChrome(image, options = {}) {
     addPalette(pal, colKinds, colProfiles, opts.tolerance);
     horizontal = contentBlock(colKinds, width, opts);
   }
-  const left = horizontal && bandTrim(colKinds, colProfiles, 0, horizontal.a, pal, opts) ? horizontal.a : 0;
+  const left =
+    horizontal && bandTrim(colKinds, colProfiles, 0, horizontal.a, pal, opts)
+      ? horizontal.a
+      : 0;
   const right =
-    horizontal && bandTrim(colKinds, colProfiles, horizontal.b, width, pal, opts) ? width - horizontal.b : 0;
+    horizontal && bandTrim(colKinds, colProfiles, horizontal.b, width, pal, opts)
+      ? width - horizontal.b
+      : 0;
 
   const band = (px, kinds, profiles, a, b) => ({
     px,

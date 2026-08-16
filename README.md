@@ -164,8 +164,12 @@ this works at all.
   whole-row score climbs 0.23 → 0.37 → 0.56 → 0.70 → 0.85 as the pillars widen
   from 10% to 35% of the frame, crossing the line at a width that is nothing
   unusual — a tall video in a squarer frame. Per slice it is 0.00 throughout. A
-  slice holding none of the line's colour scores zero rather than abstaining:
-  that is evidence against one painted surface, not an absence of evidence.
+  slice holding none of the line's colour cannot abstain — that is how the
+  pillars carried the row in the first place — so it is judged on whether it is
+  painted in its own right instead. The phone's status bar has a black pill
+  punched through the middle of it, wide enough to own a whole slice, and a nav
+  bar has solid buttons on it; those are as painted as the bar they sit on. The
+  video between two pillars is not, which is what tells them apart.
 - **Then ink decides which of the two remaining kinds it is.** A painted line
   carrying **ink** — pixels more than 60 from the background — is *interface*. A
   painted line with nothing on it is *blank*, and blank is deliberately neither
@@ -201,6 +205,13 @@ black pillarbox either side of a vertical video in a Facebook post: identical to
 a letterbox bar in isolation, but the app header above it is the same black. A
 colour that never carried ink anywhere gets no such benefit, and an image with
 no interface in it has an empty palette and no second chance.
+
+That match runs at a looser tolerance than the per-pixel one, because it answers
+a coarser question — not "is this pixel part of this line's colour" but "are
+these the same surface" — and an app routinely paints them as two different
+near-blacks. Instagram's chrome is #0C0F14 and the pillarbox around its media is
+#000000, twenty apart, which at the per-pixel tolerance left both bars attached
+to an otherwise correct crop. A mid-grey bar is still nothing like either.
 
 There is no strictness control here — nothing in it is a tolerance sweep — so
 that control is hidden rather than left sitting there doing nothing.

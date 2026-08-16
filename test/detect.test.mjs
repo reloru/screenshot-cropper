@@ -704,14 +704,20 @@ test("a mostly empty interface band still counts as interface", () => {
 });
 
 test("a stack of differently coloured bars reads as one band", () => {
-  // A Facebook video open in Safari. Below the video: a dark like/comment row,
-  // a white gap, the browser's own toolbar, then a white strip under it.
-  // Validating the stack as a single band failed it on colour — black to white
-  // is a drift of 255 — so the whole bottom of the screenshot was kept and the
-  // app reported "Bottom 0px" with a Safari toolbar plainly in frame.
+  // A Facebook post open in Safari, at both ends. Above the picture: the
+  // phone's LIGHT status bar over the app's black header. Below it: a dark
+  // like/comment row, a white gap, the browser's own toolbar, a white strip.
+  //
+  // Validating a stack as one band failed it on colour — light grey to black is
+  // a drift of 220, white to black is 255, against a limit of 48 — so both ends
+  // of the screenshot were kept. Four of the seven shots in the batch hit this,
+  // reporting "no interface" over an unmistakable app header at the top and
+  // "Bottom 0px" with a Safari toolbar plainly in frame.
   const PAPER = [255, 255, 255, 255];
+  const STATUS = [232, 232, 234, 255]; // iOS light status bar
   const img = screen(800, [
-    [300, chromeBand(UI_BG, UI_INK, 12)],
+    [70, chromeBand(STATUS, [20, 20, 22, 255], 10)], // clock, signal, battery
+    [230, chromeBand(UI_BG, UI_INK, 12)], // the app's own black header
     [900, picture()],
     [90, chromeBand(UI_BG, UI_INK, 10)], // like / comment
     [30, () => PAPER], // gap
@@ -719,8 +725,59 @@ test("a stack of differently coloured bars reads as one band", () => {
     [40, () => PAPER], // home indicator strip
   ]);
   const r = detectChrome(img);
-  assert.equal(r.top, 300, `top=${r.top}`);
+  assert.equal(r.top, 300, `top=${r.top}: reported "no interface" over a status bar and a header`);
   assert.equal(r.bottom, 340, `bottom=${r.bottom}: the browser toolbar stayed in the crop`);
+});
+
+test("a solid element covering a whole slice does not condemn its row", () => {
+  // The counterweight to the pillarbox rule above, and the reason a slice
+  // holding none of the line's colour is judged on whether IT is painted
+  // rather than simply scored zero. Scoring it zero is what the pillarbox
+  // needs — but the phone's own status bar has a black pill punched through
+  // the middle of it, wide enough to own a whole slice, and a nav bar has
+  // solid buttons on it. Those are as painted as the bar they sit on. A video
+  // between two pillars is not, which is what tells them apart.
+  //
+  // Sized so the row still passes coverage — this is about the slice rule on
+  // its own, not about the pill being wide enough to fail on colour too.
+  // Every row of the top band carries the pill, so the band stands or falls on
+  // those rows alone — no clean rows beside them to carry it.
+  const STATUS = [232, 232, 234, 255];
+  const ISLAND = [0, 0, 0, 255];
+  const bar = chromeBand(STATUS, [20, 20, 22, 255], 6);
+  const img = screen(800, [
+    [120, (x, y, w) => (x >= w * 0.375 && x < w * 0.5625 ? ISLAND : bar(x, y, w))],
+    [900, picture()],
+    [400, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 120, `top=${r.top}: the status bar read as photograph`);
+  assert.equal(r.crop.height, 900);
+});
+
+test("a pillarbox goes with a chrome that is a different near-black", () => {
+  // An Instagram post: chrome at #0C0F14, the pillarbox around its media at
+  // #000000. Twenty apart, so matching the palette at the per-pixel tolerance
+  // of 10 left both black bars attached to an otherwise correct crop. They are
+  // plainly the same surface, which is why that match is the looser one.
+  const PILLAR = [0, 0, 0, 255];
+  const rail = 150;
+  const post = (bar) =>
+    screen(900, [
+      [400, chromeBand(UI_BG, UI_INK, 12)], // header, caption, account row
+      [900, (x, y, w) => (x < rail || x >= w - rail ? bar : picture()(x, y))],
+      [400, chromeBand(UI_BG, UI_INK, 12)], // likes, caption, the next post
+    ]);
+  const r = detectChrome(post(PILLAR));
+  assert.equal(r.top, 400, `top=${r.top}`);
+  assert.equal(r.left, rail, `left=${r.left}: the pillarbox stayed`);
+  assert.equal(r.right, rail, `right=${r.right}: the pillarbox stayed`);
+
+  // ...but only as far as "same surface". A bar this interface could not have
+  // painted is still left alone for the void scan.
+  const grey = detectChrome(post([90, 92, 96, 255]));
+  assert.equal(grey.top, 400, "the inked bands above and below still go");
+  assert.equal(grey.left, 0, `left=${grey.left}: a mid-grey bar is not the app's black`);
 });
 
 test("detectChrome returns the same shape detectVoids does", () => {
