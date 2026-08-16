@@ -755,6 +755,32 @@ test("a solid element covering a whole slice does not condemn its row", () => {
   assert.equal(r.crop.height, 900);
 });
 
+test("one photographic element on a bar does not make the bar a photograph", () => {
+  // Regression from the batch this all came out of, caught on the re-run. The
+  // caption row under an Instagram post is a run of coloured emoji and the
+  // account row below it carries a circular profile photo; either fills a whole
+  // slice on its own. Condemning a line for its ONE worst slice turned those
+  // rows into picture, the block swallowed them, and a crop that had been right
+  // came back 300px where 552px belonged — the likes, the caption and the date
+  // all left in frame.
+  //
+  // Two bad slices is the line, and it is what separates an element on a bar
+  // from a pillarbox: a pillar leaves the whole middle of the row unaccounted
+  // for — six slices of eight at 10% rails, still two at 35% — while an emoji
+  // leaves one.
+  const emoji = picture(71, 13);
+  const bar = chromeBand(UI_BG, UI_INK, 10);
+  const img = screen(800, [
+    [400, chromeBand(UI_BG, UI_INK, 12)],
+    [900, picture()],
+    [60, (x, y, w) => (x >= w * 0.375 && x < w * 0.5 ? emoji(x, y) : bar(x, y, w))],
+    [340, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.bottom, 400, `bottom=${r.bottom}: the caption row was swallowed into the picture`);
+  assert.equal(r.crop.height, 900);
+});
+
 test("a pillarbox goes with a chrome that is a different near-black", () => {
   // An Instagram post: chrome at #0C0F14, the pillarbox around its media at
   // #000000. Twenty apart, so matching the palette at the per-pixel tolerance
