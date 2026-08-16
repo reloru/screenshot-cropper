@@ -216,6 +216,18 @@ near-blacks. Instagram's chrome is #0C0F14 and the pillarbox around its media is
 #000000, twenty apart, which at the per-pixel tolerance left both bars attached
 to an otherwise correct crop. A mid-grey bar is still nothing like either.
 
+**A single bad column can't veto the whole band.** Deciding *where the picture
+is* already tolerates noise: contentBlock() bridges any run under 3% of the
+axis back into its neighbour before it settles on a boundary, so a stray
+highlight or one antialiased pixel never reads as a real edge. Checking whether
+the band *outside* that boundary is one clean surface used to rescan the same
+columns with none of that tolerance — every column had to pass, no exceptions —
+so a pixel-identical pair of pillars could measure 190px trimmed on one side and
+0 on the other, because one of the 190 columns on the losing side happened to
+be a single stray pixel nowhere near either edge. It's bridged the same way now,
+against the same threshold, so only a run long enough to be real content still
+holds the band back.
+
 There is no strictness control here — nothing in it is a tolerance sweep — so
 that control is hidden rather than left sitting there doing nothing.
 
