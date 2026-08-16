@@ -529,6 +529,13 @@ const CHROME_SAMPLES = 512;
 const HIST = new Int32Array(1 << 15); // 32 levels per channel
 const TOUCHED = new Int32Array(CHROME_SAMPLES);
 
+// Evenness is measured in this many slices across the line and the worst slice
+// is the line's score. A slice needs this many of the line's own pixels side by
+// side before its score counts at all — a slice that is all text, or all some
+// other element, has nothing to say about the background.
+const SEGMENTS = 8;
+const MIN_SEGMENT_PAIRS = 8;
+
 /**
  * Measure one line: which colour owns it, how much of it that colour owns, how
  * much of it is ink, and whether that colour is PAINTED or PHOTOGRAPHED.
@@ -595,6 +602,37 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
   let pr = 0;
   let pg = 0;
   let pb = 0;
+  // Evenness is scored per SEGMENT and the worst one wins, because a line can
+  // be painted in one place and photographed in another. A night-time video
+  // pillarboxed in black is the case that forced this: each row is a quarter
+  // pure black, which is perfectly even, and the black pads the score enough to
+  // carry the noisy video between the pillars over the line. Segment it and the
+  // pillars score 1.00, the video scores 0.14, and the row is a picture.
+  const segLen = Math.max(1, Math.ceil(n / SEGMENTS));
+  let segPairs = 0;
+  let segSame = 0;
+  let segSamples = 0;
+  let segLeft = segLen;
+  let judged = 0;
+  let worst = 1;
+  const closeSegment = () => {
+    if (segPairs >= MIN_SEGMENT_PAIRS) {
+      judged++;
+      const score = segSame / segPairs;
+      if (score < worst) worst = score;
+    } else if (segSamples >= MIN_SEGMENT_PAIRS) {
+      // A whole slice of the line with none of its own colour in it. That is
+      // evidence against one painted surface, not an absence of evidence, and
+      // skipping it scored a row that was 70% pillarbox and 30% video a
+      // perfect 1.00 off the pillars alone.
+      judged++;
+      worst = 0;
+    }
+    segPairs = 0;
+    segSame = 0;
+    segSamples = 0;
+    segLeft = segLen;
+  };
   for (let o = base; o < end; o += jump) {
     const cr = data[o];
     const cg = data[o + 1];
@@ -607,23 +645,31 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
     const da = Math.abs(data[o + 3] - ra);
     if (da > d) d = da;
     const isOwn = d <= tolerance;
+    segSamples++;
     if (isOwn) {
       owned++;
       if (wasOwned) {
         pairs++;
-        if (cr === pr && cg === pg && cb === pb) same++;
+        segPairs++;
+        if (cr === pr && cg === pg && cb === pb) {
+          same++;
+          segSame++;
+        }
       }
     } else if (d > contrast) ink++;
     wasOwned = isOwn;
     pr = cr;
     pg = cg;
     pb = cb;
+    if (--segLeft === 0) closeSegment();
   }
+  closeSegment();
   return {
     cover: owned / n,
-    // No two of the line's own pixels ever landed side by side, which is itself
-    // a photograph's signature. Scoring it 0 keeps the caller's test simple.
-    even: pairs > 0 ? same / pairs : 0,
+    // Too little of the line was its own colour to segment — fall back to the
+    // whole-line ratio, and to 0 if no two of its own pixels ever landed side
+    // by side, which is itself a photograph's signature.
+    even: judged > 0 ? worst : pairs > 0 ? same / pairs : 0,
     ink: ink / n,
     r: Math.round(rr),
     g: Math.round(rg),

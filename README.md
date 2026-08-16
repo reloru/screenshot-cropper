@@ -156,6 +156,16 @@ this works at all.
   byte-for-byte identical. A rendered background is one value repeated and
   scores 0.97–1.00. A photographed one carries noise at every pixel and scores
   0.05–0.30 however smooth it looks. Nothing else separates them.
+- **Evenness is scored in eight slices and the worst slice wins**, because a
+  line can be painted in one place and photographed in another. A night-time
+  video pillarboxed in black is what forced this: each row is part pure black,
+  which is perfectly even, and averaged over the whole row that black drags the
+  noisy video between the pillars over the threshold. On the test fixture the
+  whole-row score climbs 0.23 → 0.37 → 0.56 → 0.70 → 0.85 as the pillars widen
+  from 10% to 35% of the frame, crossing the line at a width that is nothing
+  unusual — a tall video in a squarer frame. Per slice it is 0.00 throughout. A
+  slice holding none of the line's colour scores zero rather than abstaining:
+  that is evidence against one painted surface, not an absence of evidence.
 - **Then ink decides which of the two remaining kinds it is.** A painted line
   carrying **ink** — pixels more than 60 from the background — is *interface*. A
   painted line with nothing on it is *blank*, and blank is deliberately neither

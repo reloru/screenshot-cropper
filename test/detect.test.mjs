@@ -648,6 +648,44 @@ test("a dim photograph is not mistaken for interface", () => {
   assert.equal(r.crop.height, 1000);
 });
 
+test("a dark video is not swallowed by the header its pillarboxes match", () => {
+  // The worst measurement in the batch: 1208px, 43% of a Facebook video post,
+  // because the night-time top of the video went with the header above it.
+  //
+  // Two things conspire, and the pillarboxes are the nastier one. Each row of
+  // the video is a quarter pure black, which is perfectly even, and averaged
+  // over the whole row that black pads the score enough to carry the noisy
+  // video between the pillars over the line. Scoring evenness per segment and
+  // taking the worst is what separates them: the pillars score 1.00, the video
+  // scores near zero, and the row is a picture.
+  // Swept across pillar widths because the whole-line score degrades smoothly
+  // with them and the screenshot that failed sat in the survivable part of the
+  // range: measured on this fixture it reads 0.23 / 0.37 / 0.56 / 0.70 / 0.85
+  // as the rails go 10% / 14% / 20% / 28% / 35%, crossing the 0.65 threshold
+  // at a pillar width that is nothing unusual — a 9:16 video in a squarer
+  // frame. Per segment it is 0.00 at every width.
+  const UI = [1, 1, 1, 255]; // the app's own black, which the pillars match
+  const PILLAR = [0, 0, 0, 255];
+  const night = darkPicture(6, 5); // dark enough that black owns the row
+  for (const fraction of [0.1, 0.138, 0.2, 0.28, 0.35]) {
+    const width = 900;
+    const rail = Math.round(width * fraction);
+    const bar = (inner) => (x, y, w) => (x < rail || x >= w - rail ? PILLAR : inner(x, y));
+    const img = screen(width, [
+      [300, chromeBand(UI, UI_INK, 12)], // status bar, "See more videos", name
+      [500, bar(night)],
+      [500, bar(picture())],
+      [260, chromeBand(UI, UI_INK, 10)], // like / comment
+    ]);
+    const r = detectChrome(img);
+    const at = `rails at ${Math.round(fraction * 100)}%`;
+    assert.equal(r.top, 300, `top=${r.top} with ${at}: the dark top of the video went with the header`);
+    assert.equal(r.bottom, 260, `bottom=${r.bottom} with ${at}`);
+    assert.equal(r.left, rail, `left=${r.left} with ${at}: the pillarbox stayed`);
+    assert.equal(r.right, rail, `right=${r.right} with ${at}`);
+  }
+});
+
 test("a mostly empty interface band still counts as interface", () => {
   // A Facebook photo post: one 60px row of icons at the top of the screen and
   // then 600px of plain black padding before the photo starts. Requiring ink
