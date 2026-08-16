@@ -407,6 +407,24 @@ function picture(seedA = 53, seedB = 31) {
   ];
 }
 
+/**
+ * A dim photograph — the inside of a bar, a night beach. Coverage cannot tell
+ * this from a nav bar: 99% of every row sits within 10 of one value, and the
+ * bright specks in it (a neon sign, a highlight) read as ink. The one thing
+ * that separates them is that neighbouring pixels are never equal.
+ */
+function darkPicture(base = 18, spread = 7) {
+  return (x, y) => {
+    const n = (x * 2654435761 + y * 40503 + ((x * y) % 7)) >>> 0;
+    if (n % 997 < 6) {
+      const v = 150 + (n % 90);
+      return [v, v - 20, v - 40, 255];
+    }
+    const d = (n % (2 * spread + 1)) - spread;
+    return [Math.max(0, base + d), Math.max(0, base + d - 2), Math.max(0, base + d + 3), 255];
+  };
+}
+
 /** rows() with the width handed to each painter, so bands can inset from it. */
 function screen(width, bands) {
   return rows(width, bands.map(([h, fn]) => [h, (x, y) => fn(x, y, width)]));
@@ -551,14 +569,33 @@ test("columns are measured across the surviving rows only", () => {
   assert.deepEqual(r.crop, { x: 150, y: 300, width: 650, height: 800 });
 });
 
-test("bare bars beside a picture are voids, not interface", () => {
-  // The counterpart to the test above, and a deliberate limit. Side bars with
-  // nothing written on them carry no ink, so interface mode leaves them alone
-  // — they are exactly what the void scan is for. Same rule as the sky: what
-  // makes a band interface is that it has writing on it.
+test("bare bars in the interface colour go with the interface", () => {
+  // From the Facebook video screenshot: a vertical video pillarboxed in black,
+  // inside an app whose header is the same black. Nothing is written on the
+  // pillars, so on their own they are indistinguishable from a letterbox bar —
+  // but the header above them was caught carrying text in that exact colour,
+  // which makes it app background rather than sky.
+  //
+  // This measured left=0 right=0 before, and the crop came out as the video
+  // with both black pillars still attached.
   const img = screen(900, [
     [300, chromeBand(UI_BG, UI_INK, 12)],
     [800, (x, y, w) => (x < 150 || x >= w - 100 ? UI_BG : picture()(x, y))],
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 300, "the inked bands above and below still go");
+  assert.equal(r.left, 150, `left=${r.left}`);
+  assert.equal(r.right, 100, `right=${r.right}`);
+});
+
+test("a bare bar in a colour the interface never uses is left alone", () => {
+  // The guard on the rule above. The palette is evidence, not a licence: a
+  // colour that never carried ink anywhere in this image is not known to be
+  // interface, so it stays and the void scan can have it.
+  const img = screen(900, [
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+    [800, (x, y, w) => (x < 150 || x >= w - 100 ? [255, 255, 255, 255] : picture()(x, y))],
     [300, chromeBand(UI_BG, UI_INK, 12)],
   ]);
   const r = detectChrome(img);
@@ -586,6 +623,66 @@ test("a picture too small to be the subject is not cropped to", () => {
     [940, chromeBand(UI_BG, UI_INK, 12)],
   ]);
   assert.equal(detectChrome(img).hasVoid, false);
+});
+
+// --------------------------------------------------------------------------
+// Regressions from a seven-screenshot batch shot on a real phone. Three of the
+// seven came out wrong, each for a different reason, and each is reproduced
+// here with the number it used to give.
+// --------------------------------------------------------------------------
+
+test("a dim photograph is not mistaken for interface", () => {
+  // An Instagram post of a photo taken in a dark bar. The top of the picture is
+  // nearly black, so it is flat by every coverage measure, and the neon sign in
+  // it supplies the ink — the top band swallowed 374px of the picture it was
+  // supposed to be keeping and the crop cut the subjects' heads off.
+  const img = screen(800, [
+    [300, chromeBand(UI_BG, UI_INK, 12)], // status bar, username, audio row
+    [500, darkPicture()], // the dark top half of the photo
+    [500, picture()], // the lit bottom half
+    [400, chromeBand(UI_BG, UI_INK, 12)], // likes, caption, the next post
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 300, `top=${r.top}: ate the dark top of the picture`);
+  assert.equal(r.bottom, 400, `bottom=${r.bottom}`);
+  assert.equal(r.crop.height, 1000);
+});
+
+test("a mostly empty interface band still counts as interface", () => {
+  // A Facebook photo post: one 60px row of icons at the top of the screen and
+  // then 600px of plain black padding before the photo starts. Requiring ink
+  // across a FRACTION of the band scored that 0.09 and reported "no interface"
+  // over an unmistakable app header, leaving all of it attached.
+  const img = screen(800, [
+    [60, chromeBand(UI_BG, UI_INK, 12)], // close button, overflow menu
+    [600, () => UI_BG], // padding
+    [900, picture()],
+    [70, chromeBand(UI_BG, UI_INK, 12)], // caption
+    [330, () => UI_BG],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 660, `top=${r.top}: reported "no interface" over an app header`);
+  assert.equal(r.bottom, 400, `bottom=${r.bottom}`);
+});
+
+test("a stack of differently coloured bars reads as one band", () => {
+  // A Facebook video open in Safari. Below the video: a dark like/comment row,
+  // a white gap, the browser's own toolbar, then a white strip under it.
+  // Validating the stack as a single band failed it on colour — black to white
+  // is a drift of 255 — so the whole bottom of the screenshot was kept and the
+  // app reported "Bottom 0px" with a Safari toolbar plainly in frame.
+  const PAPER = [255, 255, 255, 255];
+  const img = screen(800, [
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+    [900, picture()],
+    [90, chromeBand(UI_BG, UI_INK, 10)], // like / comment
+    [30, () => PAPER], // gap
+    [180, chromeBand([28, 28, 30, 255], UI_INK, 12)], // browser toolbar
+    [40, () => PAPER], // home indicator strip
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 300, `top=${r.top}`);
+  assert.equal(r.bottom, 340, `bottom=${r.bottom}: the browser toolbar stayed in the crop`);
 });
 
 test("detectChrome returns the same shape detectVoids does", () => {

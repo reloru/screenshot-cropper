@@ -135,23 +135,38 @@ So this detector reads the image as horizontal **blocks** rather than scanning
 in from the edges, classifies each one, and keeps the largest run of picture.
 Everything above and below it becomes the trim.
 
-- **A line is interface if one colour owns it.** Not "is it flat" — a nav bar
-  has a Follow button on it and a caption row is full of text. The measure is
-  the share of the line within 10 of its most common colour. Measured on the two
-  reference screenshots, picture rows topped out at 0.48 (a meme's white caption
-  text) and interface rows bottomed out at 0.65, so the threshold sits at 0.7
-  with room either side. The dominant colour comes from a coarse histogram, not
-  a median, because an interface line is bimodal — background plus text — and
-  the median of a busy nav bar is not its background.
-- **What makes it interface rather than sky is the writing on it.** This is the
-  guard that matters, and without it the rule above is dangerous: a clear sky or
-  a studio backdrop owns its rows just as completely as a status bar does, and
-  "crop to the largest run of picture" would cheerfully delete it. So a band
-  also has to carry **ink** — pixels more than 60 from the background — across
-  at least 15% of its rows. Every genuine band in the reference pair scored
-  0.24–0.87. The one impostor, a blurred strip of the previous post's photo
-  sitting behind the status bar, scored 0.11 and drifted 177 in colour where
-  real interface drifts 3.
+Every line gets sorted into one of three kinds, and the third one is the reason
+this works at all.
+
+- **A line has an owner if one colour holds most of it.** Not "is it flat" — a
+  nav bar has a Follow button on it and a caption row is full of text. The
+  measure is the share of the line within 10 of its most common colour. Picture
+  rows topped out at 0.48 (a meme's white caption text) and interface rows
+  bottomed out at 0.65, so the threshold sits at 0.7. The dominant colour comes
+  from a coarse histogram, not a median, because an interface line is bimodal —
+  background plus text — and the median of a busy nav bar is not its background.
+- **That owner then has to be PAINTED rather than PHOTOGRAPHED.** This is the
+  guard that matters, and coverage without it is dangerous in both directions: a
+  clear sky owns its rows as completely as a status bar does, and so does the
+  dark half of a photo taken indoors — 0.9 of every row within 10 of one value,
+  with the neon sign in the shot supplying ink. On the seven-screenshot batch
+  that produced these rules, that one mistake cut 374px off the top of the
+  picture it was meant to be keeping. The test is *evenness*: of the pairs of
+  neighbouring pixels that are both the line's own colour, how many are
+  byte-for-byte identical. A rendered background is one value repeated and
+  scores 0.97–1.00. A photographed one carries noise at every pixel and scores
+  0.05–0.30 however smooth it looks. Nothing else separates them.
+- **Then ink decides which of the two remaining kinds it is.** A painted line
+  carrying **ink** — pixels more than 60 from the background — is *interface*. A
+  painted line with nothing on it is *blank*, and blank is deliberately neither
+  interface nor picture. It cannot anchor a crop, so a photograph's flat top is
+  safe; and it cannot break a band either, which is what a white gap between two
+  toolbars was doing when it left a whole Safari toolbar attached to a crop.
+- **A band goes if there is writing anywhere in it.** Eight inked lines, an
+  absolute count rather than a fraction, because interface is mostly empty: the
+  band above a Facebook photo is one 60px row of icons over 600px of plain black
+  padding. Asking for ink across a *fraction* of the band scored that 0.09 and
+  reported "no interface" over an unmistakable app header.
 - **Short runs get absorbed, in both directions.** A profile picture is a circle
   wide enough to stop its rows reading as one colour, which would split one
   chrome band into three. A meme with a caption bar across it has the mirror
@@ -167,10 +182,18 @@ Everything above and below it becomes the trim.
 
 The two detectors divide the work rather than competing, and the split falls out
 of the ink rule: a plain black letterbox bar has nothing written on it, so
-interface mode declines it and the void scan takes it. Bare bars beside a
-picture are left alone for the same reason. There is no strictness control here
-— nothing in it is a tolerance sweep — so that control is hidden rather than
-left sitting there doing nothing.
+interface mode declines it and the void scan takes it.
+
+The one exception is evidence-based. A colour caught carrying text *somewhere in
+this image* goes into a small palette, and a blank band painted entirely in a
+palette colour is trimmed even though nothing is written on it. That is the
+black pillarbox either side of a vertical video in a Facebook post: identical to
+a letterbox bar in isolation, but the app header above it is the same black. A
+colour that never carried ink anywhere gets no such benefit, and an image with
+no interface in it has an empty palette and no second chance.
+
+There is no strictness control here — nothing in it is a tolerance sweep — so
+that control is hidden rather than left sitting there doing nothing.
 
 **Straightened photos are out of scope by construction.** If you rotate a photo,
 the black fills the *corners* as triangles — no whole row or column is ever
