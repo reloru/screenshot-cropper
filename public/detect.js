@@ -767,6 +767,15 @@ function bridgeRuns(input, minRun) {
   return runs;
 }
 
+// Shortest run of lines that counts as a real section rather than a hairline
+// or a stray artefact. 3% of the axis, floored at 24 lines. Shared between
+// contentBlock() (deciding where the picture is) and bandTrim() (deciding
+// whether a bare band is one clean surface) so the two can't drift apart —
+// see the note on bandTrim for why they both need it.
+function minRun(extent) {
+  return Math.max(24, Math.round(extent * 0.03));
+}
+
 /**
  * The largest run of picture on one axis, as `{a, b}`. Null when there is none
  * big enough to be the subject.
@@ -782,9 +791,9 @@ function contentBlock(kinds, extent, opts) {
     else runs.push({ picture, a: i, b: i + 1 });
   }
 
-  // Close the gaps in both directions. 3% of the axis, floored at 24 lines:
-  // below that a "band" is a UI hairline, not a section.
-  runs = bridgeRuns(runs, Math.max(24, Math.round(extent * 0.03)));
+  // Close the gaps in both directions: below minRun a "band" is a UI
+  // hairline, not a section.
+  runs = bridgeRuns(runs, minRun(extent));
 
   let best = -1;
   for (let i = 0; i < runs.length; i++) {
@@ -841,18 +850,32 @@ function nearColor(a, b, tolerance) {
  *
  * The match runs at `family` rather than `tolerance`, because the two are
  * rarely the SAME near-black — see the note on that setting.
+ *
+ * A single column inside a bare pillar is allowed to fail both tests without
+ * vetoing the whole band. contentBlock() already tolerates exactly this kind
+ * of thing — a stray highlight, a JPEG artefact, one antialiased pixel — by
+ * bridging any run under minRun back into its neighbour before it decides
+ * where the picture starts. This function used to rescan the same columns
+ * without that tolerance, so one bad column deep inside an otherwise-clean
+ * 190px pillar reported the whole band as 0 while a pixel-identical mirror on
+ * the other side trimmed correctly. Bridged the same way here: only a run of
+ * bad columns AT LEAST minRun long is treated as real content bleeding into
+ * the band; anything shorter is noise, not a boundary.
  */
-function bandTrim(kinds, profiles, a, b, pal, opts) {
+function bandTrim(kinds, profiles, a, b, pal, opts, minRun) {
   if (b <= a) return false;
   let inked = 0;
   for (let i = a; i < b; i++) if (kinds[i] === CHROME) inked++;
   if (inked >= opts.bandInk) return true;
   if (!pal.length) return false;
+  let run = 0;
+  let longestBad = 0;
   for (let i = a; i < b; i++) {
-    if (kinds[i] === PICTURE) return false;
-    if (!pal.some((c) => nearColor(c, profiles[i], opts.family))) return false;
+    const bad = kinds[i] === PICTURE || !pal.some((c) => nearColor(c, profiles[i], opts.family));
+    run = bad ? run + 1 : 0;
+    if (run > longestBad) longestBad = run;
   }
-  return true;
+  return longestBad < minRun;
 }
 
 // The colour to show for a trimmed band. The middle INKED line, because that is
@@ -898,9 +921,11 @@ export function detectChrome(image, options = {}) {
   // a separate question, and the answer is no for a photograph that simply has
   // a flat top. Each side is asked independently.
   const top =
-    vertical && bandTrim(rowKinds, rowProfiles, 0, vertical.a, pal, opts) ? vertical.a : 0;
+    vertical && bandTrim(rowKinds, rowProfiles, 0, vertical.a, pal, opts, minRun(height))
+      ? vertical.a
+      : 0;
   const bottom =
-    vertical && bandTrim(rowKinds, rowProfiles, vertical.b, height, pal, opts)
+    vertical && bandTrim(rowKinds, rowProfiles, vertical.b, height, pal, opts, minRun(height))
       ? height - vertical.b
       : 0;
   const innerHeight = height - top - bottom;
@@ -919,11 +944,11 @@ export function detectChrome(image, options = {}) {
     horizontal = contentBlock(colKinds, width, opts);
   }
   const left =
-    horizontal && bandTrim(colKinds, colProfiles, 0, horizontal.a, pal, opts)
+    horizontal && bandTrim(colKinds, colProfiles, 0, horizontal.a, pal, opts, minRun(width))
       ? horizontal.a
       : 0;
   const right =
-    horizontal && bandTrim(colKinds, colProfiles, horizontal.b, width, pal, opts)
+    horizontal && bandTrim(colKinds, colProfiles, horizontal.b, width, pal, opts, minRun(width))
       ? width - horizontal.b
       : 0;
 

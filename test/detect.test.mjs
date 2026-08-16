@@ -806,6 +806,71 @@ test("a pillarbox goes with a chrome that is a different near-black", () => {
   assert.equal(grey.left, 0, `left=${grey.left}: a mid-grey bar is not the app's black`);
 });
 
+test("one stray column inside a pillar does not veto the whole band", () => {
+  // A pixel-identical pair of 190px pillars either side of a photo, except
+  // one column deep inside the RIGHT pillar — nowhere near the photo edge or
+  // the frame edge — reads as noise: a stray highlight, a JPEG artefact, one
+  // antialiased pixel. Before this fix that single column made bandTrim()
+  // reject the ENTIRE band, because it rescanned every raw column with no
+  // tolerance for the kind of thing contentBlock() already bridges away when
+  // it decides where the picture is. Left trimmed to 190, right stayed 0 —
+  // two visually identical bars, one kept and one not.
+  const PILLAR = [0, 0, 0, 255];
+  const noise = (x, y) => {
+    const n = (x * 2654435761 + y * 40503) >>> 0;
+    return [n % 90, (n >> 7) % 90, (n >> 3) % 90, 255];
+  };
+  const rail = 190;
+  const width = 900;
+  const build = (noisyCol) =>
+    screen(width, [
+      [400, chromeBand(UI_BG, UI_INK, 12)],
+      [
+        900,
+        (x, y, w) => {
+          if (x < rail) return PILLAR;
+          if (x >= w - rail) return noisyCol !== null && x === w - rail + noisyCol ? noise(x, y) : PILLAR;
+          return picture()(x, y);
+        },
+      ],
+      [400, chromeBand(UI_BG, UI_INK, 12)],
+    ]);
+  const clean = detectChrome(build(null));
+  assert.equal(clean.right, rail, `right=${clean.right}: baseline pillar should trim in full`);
+
+  const dented = detectChrome(build(95)); // dead centre of the pillar
+  assert.equal(dented.left, rail, `left=${dented.left}: the untouched mirror still trims`);
+  assert.equal(dented.right, rail, `right=${dented.right}: one stray column killed the whole band`);
+});
+
+test("a real chunk of content inside a pillar still declines the band", () => {
+  // The guard on the fix above. A run of picture-like columns floating in the
+  // middle of a pillar — a thumbnail sitting in what looked like a bare bar —
+  // has to keep vetoing the band once it's wide enough to be a real thing
+  // rather than noise. The threshold is exactly minRun: 3% of 900 is 27, so
+  // this sweeps 26 (tolerated) against 27 (not) to pin it precisely.
+  const PILLAR = [0, 0, 0, 255];
+  const leak = picture(97, 59);
+  const rail = 190;
+  const width = 900;
+  const leakStart = width - rail + 60; // clear of both the photo and frame edges
+  const build = (leakWidth) =>
+    screen(width, [
+      [400, chromeBand(UI_BG, UI_INK, 12)],
+      [
+        900,
+        (x, y, w) => {
+          if (x < rail) return PILLAR;
+          if (x >= w - rail) return x >= leakStart && x < leakStart + leakWidth ? leak(x, y) : PILLAR;
+          return picture()(x, y);
+        },
+      ],
+      [400, chromeBand(UI_BG, UI_INK, 12)],
+    ]);
+  assert.equal(detectChrome(build(26)).right, rail, "26px is still noise, the pillar trims in full");
+  assert.equal(detectChrome(build(27)).right, 0, "27px is a real chunk of content, the band stays");
+});
+
 test("detectChrome returns the same shape detectVoids does", () => {
   // The UI and the crop path consume either without knowing which ran.
   const img = screen(400, [
