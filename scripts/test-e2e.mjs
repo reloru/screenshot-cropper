@@ -377,6 +377,99 @@ try {
     ? ok("the interface bands are gone from the saved image")
     : bad(`a saved edge row is ${(flattest * 100).toFixed(0)}% one colour — interface survived the crop`);
 
+  // --- Interface + edges ---------------------------------------------------
+  // Same shape, but with the leftover a real batch showed: a few rows of
+  // near-black between the band and the picture, flat enough for the void scan
+  // to call it blank but not EVEN enough for the interface pass, which
+  // therefore reads it as picture and keeps it. Invisible on a phone preview,
+  // plainly there in the saved file.
+  await page.click("#reset");
+  await page.waitForFunction(() => document.getElementById("work").hidden, null, { timeout: 5000 });
+
+  const LEFT_OVER = 8;
+  const ovW = 800;
+  const ovBands = [
+    [300, "chrome"],
+    [LEFT_OVER, "leftover"],
+    [900, "picture"],
+    [LEFT_OVER, "leftover"],
+    [300, "chrome"],
+  ];
+  const ovH = ovBands.reduce((n, [h]) => n + h, 0);
+  const shot = new Uint8ClampedArray(ovW * ovH * 4);
+  let ovY = 0;
+  for (const [h, kind] of ovBands) {
+    for (let y = ovY; y < ovY + h; y++) {
+      for (let x = 0; x < ovW; x++) {
+        const o = (y * ovW + x) * 4;
+        let px;
+        if (kind === "chrome") {
+          const inked = x > 40 && x < ovW - 40 && y % 30 < 24 && (x * 7 + y * 13) % 97 < 11;
+          px = inked ? [235, 236, 238] : [12, 15, 20];
+        } else if (kind === "leftover") {
+          const d = ((x * 2654435761 + y * 40503) >>> 0) % 4;
+          px = [12 + d, 15 + d, 20 + d];
+        } else {
+          px = [40 + ((x * 53 + y * 31) % 190), 30 + ((x * 17 + y * 7) % 200), 60 + ((x * 29 + y * 11) % 170)];
+        }
+        shot[o] = px[0];
+        shot[o + 1] = px[1];
+        shot[o + 2] = px[2];
+        shot[o + 3] = 255;
+      }
+    }
+    ovY += h;
+  }
+  await page.setInputFiles("#file", {
+    name: "leftover.png",
+    mimeType: "image/png",
+    buffer: encodePng({ data: shot, width: ovW, height: ovH }),
+  });
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 20_000 });
+
+  await page.click('#work [data-mode="chrome"]');
+  await page.waitForFunction(
+    () => document.getElementById("panel-title").textContent === "App interface found",
+    null,
+    { timeout: 5000 },
+  );
+  eq(Number(await page.inputValue("#px-top")), 300, "interface mode stops at the band and keeps the leftover");
+
+  await page.click('#work [data-mode="both"]');
+  await page.waitForFunction(
+    () => document.getElementById("panel-title").textContent.includes("edges"),
+    null,
+    { timeout: 5000 },
+  );
+  eq(Number(await page.inputValue("#px-top")), 300 + LEFT_OVER, "interface + edges takes the leftover too");
+  eq(Number(await page.inputValue("#px-bottom")), 300 + LEFT_OVER, "on both ends");
+  eq(await page.isVisible("#strictness"), true, "strictness is back — this mode's second stage is the void scan");
+
+  await page.waitForFunction(() => !document.getElementById("save").disabled, null, { timeout: 20_000 });
+  const [bothDl] = await Promise.all([
+    page.waitForEvent("download", { timeout: 15_000 }),
+    page.click("#save"),
+  ]);
+  const bothPath = join(profile, "both-out.png");
+  await bothDl.saveAs(bothPath);
+  const bothOut = decodePng(readFileSync(bothPath));
+  eq(bothOut.height, 900, "saved size is the picture exactly, leftover and all");
+  // The point of the whole mode: the first and last rows of the file are
+  // picture, not a strip of near-black that looked like nothing on screen.
+  let edgeFlat = 0;
+  for (const y of [0, bothOut.height - 1]) {
+    const bins = new Map();
+    for (let x = 0; x < bothOut.width; x++) {
+      const o = (y * bothOut.width + x) * 4;
+      const k = ((bothOut.data[o] >> 3) << 10) | ((bothOut.data[o + 1] >> 3) << 5) | (bothOut.data[o + 2] >> 3);
+      bins.set(k, (bins.get(k) || 0) + 1);
+    }
+    edgeFlat = Math.max(edgeFlat, Math.max(...bins.values()) / bothOut.width);
+  }
+  edgeFlat < 0.5
+    ? ok("no near-black leftover survives on the saved edges")
+    : bad(`a saved edge row is ${(edgeFlat * 100).toFixed(0)}% one colour — the leftover survived`);
+
   // Scoped to the editor: the batch panel carries its own copy of these pills.
   await page.click('#work [data-mode="void"]');
   await page.waitForFunction(
