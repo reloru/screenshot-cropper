@@ -8,7 +8,7 @@
 // One image and many images run the same path: state.items always holds the
 // list, and a single item just opens straight into the editor.
 
-import { detectVoids, detectVoidsAuto, detectChrome, cropRect } from "./detect.js";
+import { detectVoids, detectVoidsAuto, detectChrome, detectChromeThenEdges, cropRect } from "./detect.js";
 import {
   MAX_PIXELS,
   canCopyImages,
@@ -85,6 +85,7 @@ const state = {
 const MODE_COPY = {
   void: { title: "Blank space found", noun: "blank space", empty: "no blank edge" },
   chrome: { title: "App interface found", noun: "interface", empty: "no interface" },
+  both: { title: "Interface and edges found", noun: "interface", empty: "nothing to trim" },
 };
 
 const isBatch = () => state.items.length > 1;
@@ -224,7 +225,11 @@ async function processFile(file) {
     // cheap next to the decode, and having both means switching modes is
     // instant and — more usefully — that the app can tell you when the mode you
     // are in found nothing but the other one would have.
-    item.detections = { void: measureWith(pixels), chrome: detectChrome(pixels) };
+    item.detections = {
+      void: measureWith(pixels),
+      chrome: detectChrome(pixels),
+      both: measureBoth(pixels),
+    };
     applyDetection(item);
     item.transparent = hasTransparency(pixels, item.detection.crop);
     item.thumbUrl = await makeThumb(source, item.detection.crop);
@@ -243,6 +248,14 @@ function measureWith(pixels) {
   return state.tolerance === "auto"
     ? detectVoidsAuto(pixels)
     : detectVoids(pixels, { tolerance: state.tolerance });
+}
+
+// Interface first, then blank edges inside that crop. Strictness applies to the
+// edge pass, which is why it stays visible in this mode.
+function measureBoth(pixels) {
+  return state.tolerance === "auto"
+    ? detectChromeThenEdges(pixels)
+    : detectChromeThenEdges(pixels, { tolerance: state.tolerance });
 }
 
 /** Point an item at the active detector's result and reset its trim to match. */
@@ -434,23 +447,43 @@ function refresh() {
 // 42% trim away. "Found nothing" would not have fired there.
 const OFFER_GAIN = 0.1;
 
+// The offer only ever points at the biggest alternative, so with three modes it
+// picks whichever of the other two would remove most. "Interface + edges" is a
+// superset of "app interface" by construction, so this never nags you to switch
+// between those two over a handful of pixels — the gain threshold sees to that.
+const OFFER_COPY = {
+  void: ["There's blank space around the edges", "Trim the blank edges"],
+  chrome: ["There's a picture inside the interface", "Trim to the picture"],
+  both: ["There's a picture inside the interface, with blank space still around it", "Trim to the picture"],
+};
+
 function updateOffer(item) {
-  const otherMode = state.mode === "void" ? "chrome" : "void";
-  const other = item.detections && item.detections[otherMode];
   const area = item.width * item.height;
   const mine = rectFor(item);
-  const gain = other ? (mine.width * mine.height - other.crop.width * other.crop.height) / area : 0;
+  const mineArea = mine.width * mine.height;
 
-  el.offer.hidden = gain < OFFER_GAIN;
+  let bestMode = null;
+  let bestGain = 0;
+  for (const mode of Object.keys(OFFER_COPY)) {
+    if (mode === state.mode) continue;
+    const other = item.detections && item.detections[mode];
+    if (!other) continue;
+    const gain = (mineArea - other.crop.width * other.crop.height) / area;
+    if (gain > bestGain) {
+      bestGain = gain;
+      bestMode = mode;
+    }
+  }
+
+  el.offer.hidden = bestGain < OFFER_GAIN;
   if (el.offer.hidden) return;
+  const other = item.detections[bestMode];
   const size = `${other.crop.width} × ${other.crop.height}`;
   const now = `${mine.width} × ${mine.height}`;
-  el.offerText.textContent =
-    otherMode === "chrome"
-      ? `There's a picture inside the interface — trimming to it leaves ${size} instead of ${now}.`
-      : `There's blank space around the edges — trimming it leaves ${size} instead of ${now}.`;
-  el.offerGo.textContent = otherMode === "chrome" ? "Trim to the picture" : "Trim the blank edges";
-  el.offerGo.dataset.go = otherMode;
+  const [lead, action] = OFFER_COPY[bestMode];
+  el.offerText.textContent = `${lead} — trimming it leaves ${size} instead of ${now}.`;
+  el.offerGo.textContent = action;
+  el.offerGo.dataset.go = bestMode;
 }
 
 // ----------------------------------------------------------------- batch view
@@ -706,7 +739,10 @@ for (const button of el.tolerance) {
     // have unless you open them.
     const item = current();
     if (item && state.open) {
+      // Both of these consume the strictness setting — the void scan directly,
+      // and the combined pass for its edge stage.
       item.detections.void = measureWith(state.open.imageData);
+      item.detections.both = measureBoth(state.open.imageData);
       applyDetection(item);
       refresh();
     }
@@ -716,7 +752,8 @@ for (const button of el.tolerance) {
 // Strictness is a property of the void scan — it sweeps tolerances looking for
 // a flat band. Interface detection has no such dial (it keys off how much of a
 // line is one colour and whether there is writing on it), so the control is
-// hidden rather than left there doing nothing.
+// hidden rather than left there doing nothing. It comes BACK for interface +
+// edges, because that mode's second stage is the void scan.
 function setMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
@@ -724,7 +761,7 @@ function setMode(mode) {
     button.setAttribute("aria-checked", String(button.dataset.mode === mode));
   }
   el.panelTitle.textContent = MODE_COPY[mode].title;
-  el.strictness.hidden = mode !== "void";
+  el.strictness.hidden = mode === "chrome";
 
   for (const item of state.items) applyDetection(item);
   if (state.editing !== null) {

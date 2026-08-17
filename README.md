@@ -231,6 +231,39 @@ holds the band back.
 There is no strictness control here — nothing in it is a tolerance sweep — so
 that control is hidden rather than left sitting there doing nothing.
 
+### Interface + edges
+
+A third mode, and it exists because of what 139 real screenshots showed: the
+interface pass gets the crop visually right, but on most of them it leaves a few
+pixels of band behind — about 4–6px on the sides, 6–8 top and bottom, worst case
+around 12, and never symmetric. Saving the crop and running the void scan over
+it by hand fixed all 139 without damaging one. This mode is that second run, in
+one step: interface first, then the void scan **inside** the resulting crop.
+
+What the leftover actually is, once reproduced: near-black, flat by *range* — so
+the void scan reads it as blank — but with neighbouring pixels differing by a
+unit or two, so it fails the painted-vs-photographed test and the interface pass
+calls it picture and keeps it. That is also why it looks like solid black to the
+eye and why nobody spots it in the preview: on a phone, 6 real pixels is under
+one CSS pixel, thinner than the red outline drawn over it.
+
+Two things make it safe to hand somebody:
+
+- **It only runs inside an interface crop.** No interface found means no crop to
+  refine, and refining the whole image would just *be* blank-edges mode — which
+  is the thing that would crop the sky off a photograph.
+- **It is capped per side**, at 12px or 0.5% of the axis, whichever is larger.
+  Uncapped, this pass reads the entire dark half of a dim photograph as blank and
+  takes 500px of it, because at the tolerances the sweep reaches a dim photograph
+  *is* flat. The cap recovers every leftover measured in full and bounds that
+  worst case to a fraction of a percent.
+
+It is deliberately a separate mode rather than folded into the interface pass.
+Tried inline, it cost 12px off the top of a dim photograph silently and broke two
+of that detector's own regression tests. As a mode you pick, an over-trim lands
+in the editable side fields where you can see it and type over it. The strictness
+control comes back here too, because this mode's second stage is the void scan.
+
 **Straightened photos are out of scope by construction.** If you rotate a photo,
 the black fills the *corners* as triangles — no whole row or column is ever
 blank, so there is no rectangle to trim. The app detects that shape and says so

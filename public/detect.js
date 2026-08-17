@@ -293,12 +293,26 @@ function looksRotated(data, width, height, opts) {
  *
  * @param {{data: Uint8ClampedArray|Uint8Array, width: number, height: number}} image
  *        RGBA pixels, as returned by getImageData().
- * @param {{tolerance?, noiseBudget?, grace?, jump?}} [options]
+ * @param {{tolerance?, noiseBudget?, grace?, jump?, window?}} [options]
+ *        `window` restricts the scan to a sub-rectangle `{x, y, width, height}`
+ *        of the same buffer, with no copy: every line address is already built
+ *        through a closure, so windowing only changes the arithmetic inside it.
+ *        detectChrome() uses this to re-measure inside its own crop.
  * @returns {{width, height, top, bottom, left, right, sides, crop, blankImage, hasVoid, rotated}}
  */
 export function detectVoids(image, options = {}) {
-  const { data, width, height } = image;
-  if (!width || !height) throw new Error("detectVoids: image has no dimensions");
+  const { data } = image;
+  if (!image.width || !image.height) throw new Error("detectVoids: image has no dimensions");
+
+  // `stride` is how many pixels a row of the underlying buffer holds, which is
+  // the full image width even when only a window of it is being scanned.
+  const stride = image.width;
+  const win = options.window;
+  const width = win ? win.width : image.width;
+  const height = win ? win.height : image.height;
+  const ox = win ? win.x : 0;
+  const oy = win ? win.y : 0;
+  if (width <= 0 || height <= 0) throw new Error("detectVoids: window has no area");
 
   const opts = {
     tolerance: options.tolerance ?? DEFAULTS.tolerance,
@@ -308,7 +322,7 @@ export function detectVoids(image, options = {}) {
   };
 
   // Rows first. Each row spans the full width.
-  const rowLine = (y) => (x) => (y * width + x) * 4;
+  const rowLine = (y) => (x) => ((oy + y) * stride + ox + x) * 4;
   const topBand = scanBand(data, rowLine, width, 0, 1, height, opts);
   const top = topBand.px;
   const bottomBand = scanBand(data, rowLine, width, height - 1, -1, height - top, opts);
@@ -319,7 +333,7 @@ export function detectVoids(image, options = {}) {
   // black pixels, which would drag the left/right band colors off and either
   // hide a real side void or invent one.
   const innerHeight = height - top - bottom;
-  const colLine = (x) => (i) => ((top + i) * width + x) * 4;
+  const colLine = (x) => (i) => ((oy + top + i) * stride + ox + x) * 4;
   const leftBand = scanBand(data, colLine, innerHeight, 0, 1, width, opts);
   const left = leftBand.px;
   const rightBand = scanBand(data, colLine, innerHeight, width - 1, -1, width - left, opts);
@@ -345,7 +359,10 @@ export function detectVoids(image, options = {}) {
     blankImage,
     hasVoid,
     // Only interesting when we found nothing — otherwise there IS a rectangle.
-    rotated: !hasVoid && !blankImage && looksRotated(data, width, height, opts),
+    // Skipped under a window: this probes the four corners of a whole image to
+    // recognise a straightened photo, which is not a question a sub-rectangle
+    // can answer, and its addressing assumes stride === width.
+    rotated: !win && !hasVoid && !blankImage && looksRotated(data, width, height, opts),
     tolerance: opts.tolerance,
   };
 }
@@ -981,6 +998,90 @@ export function detectChrome(image, options = {}) {
     // Nothing but interface: no run of picture cleared minBlock. Worth saying,
     // because it is a different answer from "this already fills the frame".
     allChrome: !vertical && rowKinds.some((k) => k === CHROME),
+  };
+}
+
+/**
+ * Interface first, then blank edges — the two detectors run one after the other,
+ * the second one inside the first one's crop.
+ *
+ * This exists because of what a 139-screenshot batch showed: interface mode gets
+ * the crop visually right, but leaves a few pixels of the band behind on most
+ * images — about 4-6px on the sides and 6-8 top and bottom, worst case around
+ * 12, and never balanced, because each edge of a media container blends into the
+ * picture over a slightly different distance. Saving that crop and running the
+ * void scan over it by hand cleaned up all 139 without damaging one of them.
+ * This is that second run, done in one step.
+ *
+ * Why it is a separate function rather than folded into detectChrome():
+ *
+ *   detectChrome() keeps its contract. The refinement is a genuinely different
+ *   question — "is there blank space inside this crop" — answered by the
+ *   detector built for it, and mixing the two silently cost 12px off the top of
+ *   a dim photograph when it was tried inline. Here it is a mode the user picks
+ *   and can see, so an over-trim lands in the editable side fields instead of
+ *   disappearing into one number.
+ *
+ *   Capped per side. A leftover is a boundary artefact and is small by nature —
+ *   the worst measured was about 12px. Uncapped, this pass reads the whole dark
+ *   half of a dim photograph as blank and takes 500px of it, because at the
+ *   tolerances the sweep reaches, a dim photograph IS flat. EDGE_CAP of the
+ *   axis, floored at 12px, recovers every leftover measured in full while
+ *   bounding that worst case to a fraction of a percent.
+ *
+ * The second pass reads the same pixel buffer through a window, so nothing is
+ * copied. `tolerance` is forwarded to it, which is why the strictness control is
+ * meaningful in this mode and hidden in plain interface mode.
+ *
+ * @param {{data: Uint8ClampedArray|Uint8Array, width: number, height: number}} image
+ * @param {Partial<typeof CHROME_DEFAULTS> & {tolerance?: number}} [options]
+ */
+const EDGE_CAP = 0.005;
+
+export function detectChromeThenEdges(image, options = {}) {
+  const chrome = detectChrome(image, options);
+  const rect = chrome.crop;
+  // Nothing found, nothing to refine — and refining a crop that is the whole
+  // image would just BE the void scan, which is the other mode.
+  if (!chrome.hasVoid || rect.width < 4 || rect.height < 4) return chrome;
+
+  const edges =
+    options.tolerance == null
+      ? detectVoidsAuto(image, { window: rect })
+      : detectVoids(image, { ...options, window: rect });
+
+  const cap = (axis) => Math.max(12, Math.round(axis * EDGE_CAP));
+  const add = (side) =>
+    Math.min(edges[side], cap(side === "top" || side === "bottom" ? chrome.height : chrome.width));
+  const trim = {
+    top: chrome.top + add("top"),
+    bottom: chrome.bottom + add("bottom"),
+    left: chrome.left + add("left"),
+    right: chrome.right + add("right"),
+  };
+
+  // Report the interface colour where interface was trimmed, and the leftover's
+  // own colour where it was not — the number is the total either way.
+  const sides = {};
+  for (const side of ["top", "bottom", "left", "right"]) {
+    const total = side === "top" || side === "bottom" ? chrome.height : chrome.width;
+    const from = chrome.sides[side].px > 0 ? chrome.sides[side] : edges.sides[side];
+    sides[side] = {
+      ...from,
+      px: trim[side],
+      pct: total > 0 ? Math.round((trim[side] / total) * 1000) / 10 : 0,
+      nextPx: 0,
+    };
+  }
+
+  return {
+    ...chrome,
+    ...trim,
+    sides,
+    crop: cropRect({ width: chrome.width, height: chrome.height }, trim),
+    hasVoid: trim.top + trim.bottom + trim.left + trim.right > 0,
+    // Marks which pipeline produced this, for anything that needs to tell.
+    edges: true,
   };
 }
 

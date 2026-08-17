@@ -6,7 +6,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { detectVoids, detectVoidsAuto, detectChrome, cropRect, colorName } from "../public/detect.js";
+import {
+  detectVoids,
+  detectVoidsAuto,
+  detectChrome,
+  detectChromeThenEdges,
+  cropRect,
+  colorName,
+} from "../public/detect.js";
 import { makeImage, setPixel, encodePng, decodePng, rows } from "../scripts/png.mjs";
 
 const BLACK = [0, 0, 0, 255];
@@ -869,6 +876,111 @@ test("a real chunk of content inside a pillar still declines the band", () => {
     ]);
   assert.equal(detectChrome(build(26)).right, rail, "26px is still noise, the pillar trims in full");
   assert.equal(detectChrome(build(27)).right, 0, "27px is a real chunk of content, the band stays");
+});
+
+// --------------------------------------------------------------------------
+// Interface then edges (detectChromeThenEdges). From a 139-screenshot batch:
+// interface mode got the crop visually right but left a few pixels of band
+// behind on most images, and saving the crop and running the void scan over it
+// by hand cleaned up all 139. This is that second run in one step.
+// --------------------------------------------------------------------------
+
+/**
+ * The leftover, as measured. Near-black, and flat by RANGE — so the void scan
+ * reads it as blank — but its neighbouring pixels differ by a unit or two, so
+ * it fails the painted-vs-photographed test and the interface pass calls it
+ * picture and keeps it. That combination is the whole reason this mode exists,
+ * and it is why the leftover looks like solid black to the eye.
+ */
+function dither(amp, bg = UI_BG) {
+  return (x, y) => {
+    const n = (x * 2654435761 + y * 40503) >>> 0;
+    const d = n % (amp + 1);
+    return [bg[0] + d, bg[1] + d, bg[2] + d, 255];
+  };
+}
+
+test("the edge pass recovers a leftover the interface pass cannot see", () => {
+  for (const amp of [2, 3, 6]) {
+    for (const px of [6, 12]) {
+      const img = screen(900, [
+        [400, chromeBand(UI_BG, UI_INK, 12)],
+        [px, dither(amp)],
+        [900, picture()],
+        [px, dither(amp)],
+        [400, chromeBand(UI_BG, UI_INK, 12)],
+      ]);
+      const at = `${px}px leftover, dither ${amp}`;
+      // The interface pass alone stops at the band and keeps the leftover...
+      const chrome = detectChrome(img);
+      assert.equal(chrome.top, 400, `interface-only top=${chrome.top} (${at})`);
+      // ...and the edge pass takes exactly it, no more.
+      const both = detectChromeThenEdges(img);
+      assert.equal(both.top, 400 + px, `top=${both.top}, want ${400 + px} (${at})`);
+      assert.equal(both.bottom, 400 + px, `bottom=${both.bottom}, want ${400 + px} (${at})`);
+    }
+  }
+});
+
+test("the edge pass is capped, so a dim photograph cannot be eaten", () => {
+  // THE guard. A dim photograph is flat at the tolerances the sweep reaches, so
+  // uncapped this pass read the entire dark half of this fixture as blank and
+  // took 500px of the picture. The cap is what makes the mode safe to hand
+  // somebody: 12px, or 0.5% of the axis, whichever is larger.
+  const img = screen(800, [
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+    [500, darkPicture()],
+    [500, picture()],
+    [400, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const chrome = detectChrome(img);
+  const both = detectChromeThenEdges(img);
+  assert.equal(chrome.top, 300, "the interface pass is exact on this one");
+  const cost = both.top - chrome.top;
+  assert.ok(cost <= 12, `the edge pass took ${cost}px off a photograph, cap is 12`);
+});
+
+test("the edge pass declines entirely when there is no interface", () => {
+  // It only ever runs INSIDE an interface crop. With no interface there is no
+  // crop to refine, and running it anyway would just be blank-edges mode —
+  // which is the thing that would crop the sky off a photograph.
+  const sky = rows(500, [
+    [400, (x, y) => { const v = 150 + Math.round(y * 0.12); return [v - 40, v - 10, v + 40, 255]; }],
+    [500, picture(61, 23)],
+  ]);
+  assert.equal(detectChromeThenEdges(sky).top, 0, "a flat sky is left alone");
+
+  const studio = rows(500, [
+    [300, () => [232, 231, 229, 255]],
+    [400, picture()],
+    [300, () => [232, 231, 229, 255]],
+  ]);
+  const r = detectChromeThenEdges(studio);
+  assert.equal(r.top, 0, "a studio backdrop is left alone");
+  assert.equal(r.bottom, 0);
+});
+
+test("detectChromeThenEdges returns the same shape the others do", () => {
+  const img = screen(900, [
+    [400, chromeBand(UI_BG, UI_INK, 12)],
+    [8, dither(3)],
+    [900, picture()],
+    [400, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const both = detectChromeThenEdges(img);
+  const voids = detectVoids(img);
+  for (const key of ["width", "height", "top", "bottom", "left", "right", "sides", "crop", "blankImage", "hasVoid", "rotated"]) {
+    assert.ok(key in both, `missing ${key}`);
+  }
+  assert.deepEqual(Object.keys(both.sides).sort(), Object.keys(voids.sides).sort());
+  for (const side of ["top", "bottom", "left", "right"]) {
+    assert.deepEqual(Object.keys(both.sides[side]).sort(), Object.keys(voids.sides[side]).sort());
+  }
+  // The reported number and the crop it produces have to agree, or the red
+  // overlay in the UI stops matching the file that gets saved.
+  assert.equal(both.crop.height, both.height - both.top - both.bottom, "crop matches the numbers");
+  assert.equal(both.crop.width, both.width - both.left - both.right);
+  assert.equal(both.sides.top.px, both.top, "the side row and the trim agree");
 });
 
 test("detectChrome returns the same shape detectVoids does", () => {
