@@ -4,6 +4,7 @@
 // on an actual iPhone; each carries the wrong value it used to produce so a
 // regression is obvious.
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import {
@@ -899,6 +900,56 @@ function dither(amp, bg = UI_BG) {
     return [bg[0] + d, bg[1] + d, bg[2] + d, 255];
   };
 }
+
+// --------------------------------------------------------------------------
+// A photograph that carries its own border. Interface mode proposed cutting
+// 208px off a real 640x954 film scan -- the whole overcast sky, down to the
+// mountain peaks -- and the crop it offered would have destroyed the picture.
+// --------------------------------------------------------------------------
+
+test("a framed photograph is not an app screenshot", () => {
+  // THE fixture is the photograph itself, cropped to the top 420 rows, because
+  // three synthetic stand-ins in a row failed to reproduce it. Each looked
+  // right and proved nothing: a sky that wobbled per pixel read as picture
+  // before the ink rule was consulted; peaks dense enough to see dragged
+  // coverage under the threshold; peaks sparse enough to keep coverage let the
+  // palette path trim the band by another route entirely. Measured against the
+  // real pixels this crop reports 208 without the two rules below and 0 with
+  // them, which is the only evidence that actually settles it.
+  //
+  // What makes it hard is that every individual signal says "interface":
+  //   cover 0.97   the sky is flat
+  //   even  0.96   and compressed smooth enough to read as PAINTED, not
+  //                photographed -- the guard that normally saves a sky
+  //   ink          the dark film border marks both ends of every row, and the
+  //                peaks mark a few more rows at the very bottom
+  //
+  // Two rules pull it apart, and both are needed -- with either one alone this
+  // still measures 208:
+  //   edgeMargin     ink at the extreme ends of a line is a border, not
+  //                  writing. 162 of the 176 inked rows carried nothing else.
+  //   PICTURE_BLEED  ink hard against the picture is the picture's own detail.
+  //                  All 14 remaining inked rows sat at 93%..100% of the band,
+  //                  where a real app header's ink runs 0%..96%.
+  const img = decodePng(readFileSync(new URL("./fixtures/framed-photo.png", import.meta.url)));
+  const r = detectChrome(img);
+  assert.equal(r.top, 0, `top=${r.top}: cropped the sky off a framed photograph`);
+  assert.equal(r.hasVoid, false, "nothing here is app interface");
+});
+
+test("...but interface with inset writing still goes", () => {
+  // The guard on both rules: they must not blind the detector to an ordinary
+  // band. Same proportions as the photo above, with a real inked bar where the
+  // sky was.
+  const img = screen(640, [
+    [200, chromeBand(UI_BG, UI_INK, 12)],
+    [700, picture()],
+    [200, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 200, `top=${r.top}: a real interface band stopped being found`);
+  assert.equal(r.bottom, 200, `bottom=${r.bottom}`);
+});
 
 test("the edge pass recovers a leftover the interface pass cannot see", () => {
   for (const amp of [2, 3, 6]) {

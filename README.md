@@ -184,6 +184,23 @@ this works at all.
   band above a Facebook photo is one 60px row of icons over 600px of plain black
   padding. Asking for ink across a *fraction* of the band scored that 0.09 and
   reported "no interface" over an unmistakable app header.
+- **A photograph's own border is not writing on it.** Ink within 4% of either
+  end of a line does not count. A film scan, a print, a mat around a photo all
+  put a high-contrast mark at both ends of every row, and that is all the ink
+  rule ever asked for — on a real 640x954 film photo of a mountain village, the
+  overcast sky scored cover 0.97 and even 0.96 (compression quantises a flat
+  sky into wide identical runs, so it reads as *painted*), the frame supplied
+  the writing, and interface mode proposed cutting 208px: the whole sky, down to
+  the peaks. 162 of the 176 inked rows in that band carried nothing but the
+  frame. Real interface text is inset from the edge, so the margin costs it
+  nothing.
+- **Ink hard against the picture is the picture's own detail.** The last 10% of
+  a band, at the end that touches the picture, is discounted when asking whether
+  the band has writing. Strip the frame from that same photo and the mountain
+  peaks poking into the sky still inked 14 rows — enough on their own to clear
+  the eight-line floor — and all 14 sat between 93% and 100% of the way down the
+  band, where a real app header's ink runs 0%–96%. An app's interface does not
+  stop dead one row short of the photo; a ridgeline does.
 - **Short runs get absorbed, in both directions.** A profile picture is a circle
   wide enough to stop its rows reading as one colour, which would split one
   chrome band into three. A meme with a caption bar across it has the mirror
