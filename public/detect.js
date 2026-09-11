@@ -511,6 +511,27 @@ export const CHROME_DEFAULTS = {
   // Ink covering this much of a line makes it an inked line. 0.5% of 1290px is
   // ~6 pixels, which is a glyph or two.
   inkRow: 0.005,
+  // Ink this close to either END of a line is not writing, and does not count.
+  //
+  // A photograph can carry its own border — a film negative's black frame, a
+  // print's dark edge, a mat around a scan. Every row crossing it picks up two
+  // high-contrast marks, one at each end, and that is all the ink rule ever
+  // asked for. On a real film photo of a mountain village the overcast sky
+  // scored cover 0.97 and even 0.96, which is flat and painted enough by every
+  // other measure, and the frame supplied the writing: interface mode proposed
+  // cutting 208px, the whole sky down to the peaks. Measured on those rows,
+  // EVERY ink pixel sat within 5% of an edge.
+  //
+  // Interface text is inset from the edge instead — a status bar's clock and
+  // battery, a caption, a nav title all sit clear of the frame — so ignoring a
+  // narrow margin costs real interface nothing.
+  //
+  // Swept against that photo: the sky is still claimed at 0.02 and released at
+  // 0.03, which puts that film border around 19px of its 640. 0.04 takes one
+  // step of headroom past the cliff and is still inside the 5% inset the test
+  // fixtures put their synthetic text at, so it cannot silently blind those.
+  // None of the other real screenshots move anywhere in 0.02..0.08.
+  edgeMargin: 0.04,
   // How many inked lines a band needs before the whole band counts as
   // interface. An absolute count, not a fraction: interface is mostly EMPTY.
   // The band above the photo in a Facebook post is 700px of plain black
@@ -580,7 +601,7 @@ const MIN_SEGMENT_PAIRS = 8;
  * @param {number} stride bytes between consecutive pixels (4 along a row,
  *                        width*4 down a column)
  */
-function lineProfile(data, base, stride, length, tolerance, contrast) {
+function lineProfile(data, base, stride, length, tolerance, contrast, edgeMargin = 0) {
   if (length <= 0) return null;
   const step = Math.max(1, Math.ceil(length / CHROME_SAMPLES));
   const jump = step * stride;
@@ -667,7 +688,11 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
     segAllSame = 0;
     segLeft = segLen;
   };
+  // Ink inside this many samples of either end is a border, not writing.
+  const margin = Math.round(n * edgeMargin);
+  let idx = -1;
   for (let o = base; o < end; o += jump) {
+    idx++;
     const cr = data[o];
     const cg = data[o + 1];
     const cb = data[o + 2];
@@ -695,7 +720,7 @@ function lineProfile(data, base, stride, length, tolerance, contrast) {
           segSame++;
         }
       }
-    } else if (d > contrast) ink++;
+    } else if (d > contrast && idx >= margin && idx < n - margin) ink++;
     wasOwned = isOwn;
     pr = cr;
     pg = cg;
@@ -783,6 +808,12 @@ function bridgeRuns(input, minRun) {
   }
   return runs;
 }
+
+// How much of a band, at the end that touches the picture, is discounted when
+// asking whether the band has writing on it. A picture's own detail bleeds
+// across that boundary; an app's interface does not stop dead one row short of
+// the photo. See bandTrim().
+const PICTURE_BLEED = 0.1;
 
 // Shortest run of lines that counts as a real section rather than a hairline
 // or a stray artefact. 3% of the axis, floored at 24 lines. Shared between
@@ -879,10 +910,20 @@ function nearColor(a, b, tolerance) {
  * bad columns AT LEAST minRun long is treated as real content bleeding into
  * the band; anything shorter is noise, not a boundary.
  */
-function bandTrim(kinds, profiles, a, b, pal, opts, minRun) {
+function bandTrim(kinds, profiles, a, b, pal, opts, minRun, pictureAtEnd) {
   if (b <= a) return false;
+  // Writing right up against the picture is not the band's writing — it is the
+  // picture's own detail crossing the boundary. A film photo of a mountain
+  // village makes the case: its overcast sky is flat and even enough to read as
+  // painted, and the peaks poking into that sky are high-contrast enough to
+  // read as ink, so the band claimed 208px — the entire sky. Measured on it,
+  // all 14 of the band's genuinely inked rows sat between 93% and 100% of the
+  // way down, against a real app header whose ink runs 0%..96%.
+  const bleed = Math.round((b - a) * PICTURE_BLEED);
+  const from = pictureAtEnd ? a : a + bleed;
+  const to = pictureAtEnd ? b - bleed : b;
   let inked = 0;
-  for (let i = a; i < b; i++) if (kinds[i] === CHROME) inked++;
+  for (let i = from; i < to; i++) if (kinds[i] === CHROME) inked++;
   if (inked >= opts.bandInk) return true;
   if (!pal.length) return false;
   let run = 0;
@@ -928,7 +969,9 @@ export function detectChrome(image, options = {}) {
   // every column with interface colour and every column reads as chrome.
   const rowProfiles = [];
   for (let y = 0; y < height; y++) {
-    rowProfiles.push(lineProfile(data, y * width * 4, 4, width, opts.tolerance, opts.contrast));
+    rowProfiles.push(
+      lineProfile(data, y * width * 4, 4, width, opts.tolerance, opts.contrast, opts.edgeMargin),
+    );
   }
   const rowKinds = rowProfiles.map((p) => classify(p, opts));
   const pal = addPalette([], rowKinds, rowProfiles, opts.tolerance);
@@ -938,11 +981,11 @@ export function detectChrome(image, options = {}) {
   // a separate question, and the answer is no for a photograph that simply has
   // a flat top. Each side is asked independently.
   const top =
-    vertical && bandTrim(rowKinds, rowProfiles, 0, vertical.a, pal, opts, minRun(height))
+    vertical && bandTrim(rowKinds, rowProfiles, 0, vertical.a, pal, opts, minRun(height), true)
       ? vertical.a
       : 0;
   const bottom =
-    vertical && bandTrim(rowKinds, rowProfiles, vertical.b, height, pal, opts, minRun(height))
+    vertical && bandTrim(rowKinds, rowProfiles, vertical.b, height, pal, opts, minRun(height), false)
       ? height - vertical.b
       : 0;
   const innerHeight = height - top - bottom;
@@ -953,7 +996,15 @@ export function detectChrome(image, options = {}) {
   if (vertical && innerHeight > 0) {
     for (let x = 0; x < width; x++) {
       colProfiles.push(
-        lineProfile(data, (top * width + x) * 4, width * 4, innerHeight, opts.tolerance, opts.contrast),
+        lineProfile(
+          data,
+          (top * width + x) * 4,
+          width * 4,
+          innerHeight,
+          opts.tolerance,
+          opts.contrast,
+          opts.edgeMargin,
+        ),
       );
     }
     colKinds = colProfiles.map((p) => classify(p, opts));
@@ -961,11 +1012,11 @@ export function detectChrome(image, options = {}) {
     horizontal = contentBlock(colKinds, width, opts);
   }
   const left =
-    horizontal && bandTrim(colKinds, colProfiles, 0, horizontal.a, pal, opts, minRun(width))
+    horizontal && bandTrim(colKinds, colProfiles, 0, horizontal.a, pal, opts, minRun(width), true)
       ? horizontal.a
       : 0;
   const right =
-    horizontal && bandTrim(colKinds, colProfiles, horizontal.b, width, pal, opts, minRun(width))
+    horizontal && bandTrim(colKinds, colProfiles, horizontal.b, width, pal, opts, minRun(width), false)
       ? width - horizontal.b
       : 0;
 
