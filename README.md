@@ -278,6 +278,38 @@ npm test           # unit tests for the measuring maths
 npm run deploy     # wrangler deploy
 ```
 
+### Measuring a real screenshot
+
+Every rule in `detect.js` exists because of a specific photo, so the ability to
+point the detectors at an actual file matters more here than it looks. For a
+long time that was impossible — nothing in the toolchain reads HEIC, which is
+what an iPhone hands you — and fixes were built against fixtures reconstructed
+from a description. Twice that produced a fix for a mechanism that turned out
+not to be the real one, once shipping a regression. These two close that loop.
+
+```sh
+npm run inspect -- shots/*                    # what each mode measures
+npm run inspect -- shot.heic --map            # where the busy pixels are
+npm run inspect -- shot.heic --overlay /tmp/x # the app's preview, as files
+npm run decode  -- shots/* --out /tmp/png     # anything -> PNG, to look at
+```
+
+`inspect` runs the same `detect.js` the page runs, so its numbers are the
+numbers the app would show for that file — which is how you tell a faithful
+reproduction from a plausible-sounding story. `--overlay` shades what would be
+thrown away, and is the fastest way to see an over-crop: the film-photo case
+below is instantly obvious as a screenful of red sky.
+
+`--map` prints a coarse text picture of local variation, using the same measure
+`evenness` uses. It is cheap to read and enough to distinguish "the photo is
+centred in a wide margin" from "the photo runs to the edge" without opening the
+image — that is how a diagonal-gradient background got spotted.
+
+Formats: PNG through `scripts/png.mjs`, HEIC/HEIF through `libheif-js`, and
+everything else through Chromium — deliberately, because that is the same
+`createImageBitmap` path `public/pipeline.js` uses, so the pixels measured here
+are the pixels the app would have measured.
+
 ### Tests
 
 - `npm test` — `node --test`, no browser. Covers the measurement rules against
