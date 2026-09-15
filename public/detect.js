@@ -843,10 +843,32 @@ function contentBlock(kinds, extent, opts) {
   // hairline, not a section.
   runs = bridgeRuns(runs, minRun(extent));
 
+  // Rank by how much PICTURE a run actually holds, not by how far it reaches
+  // once the gaps are filled. Bridging is there to stop a caption bar splitting
+  // one photo in two, but it also fuses a cluster of unrelated fragments into a
+  // single long span, and that span then outranks a genuinely solid block.
+  //
+  // A YouTube watch page is the case: the video's artwork is 593 contiguous
+  // picture rows, the largest real block on the page, while the autoplay-next
+  // banner below it is three fragments of 438, 34 and 48 rows separated by
+  // sub-minRun gaps. Bridged, those become a 630-row span and win on reach
+  // alone, so the crop kept the suggested video and threw the actual one away.
+  // Counting picture instead puts the artwork ahead, 593 to 520.
+  const weigh = (run) => {
+    let n = 0;
+    for (let i = run.a; i < run.b; i++) if (kinds[i] === PICTURE) n++;
+    return n;
+  };
+
   let best = -1;
+  let bestWeight = -1;
   for (let i = 0; i < runs.length; i++) {
     if (!runs[i].picture) continue;
-    if (best < 0 || runs[i].b - runs[i].a > runs[best].b - runs[best].a) best = i;
+    const weight = weigh(runs[i]);
+    if (weight > bestWeight) {
+      bestWeight = weight;
+      best = i;
+    }
   }
   if (best < 0) return null;
   const block = runs[best];

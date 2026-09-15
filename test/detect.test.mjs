@@ -536,6 +536,37 @@ test("a wide button does not split the interface band around it", () => {
   assert.equal(r.crop.height, 1000);
 });
 
+test("a fragmented region does not outrank a solid one by gap-filling", () => {
+  // From a YouTube watch page. The video's own artwork is 593 contiguous
+  // picture rows -- the largest real block on the page -- while the
+  // autoplay-next banner below it is three fragments of 438, 34 and 48 rows
+  // separated by sub-minRun gaps. Bridging fused those into a 630-row span,
+  // which beat the artwork on reach, so the crop kept the SUGGESTED video and
+  // threw the actual one away.
+  //
+  // Bridging has to stay: it is what stops a caption bar splitting one photo in
+  // two (the test above). What changes is the ranking -- a run is measured by
+  // how much picture it holds, not how far it reaches once the gaps are filled.
+  //
+  // Sized so the two rules disagree: solid block 600 rows; fragments 400 + 70 +
+  // 100 = 570 rows of picture inside a 670-row bridged span. Reach picks the
+  // fragments, content picks the solid block.
+  const img = screen(800, [
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+    [600, picture()], // the solid block -- the real subject
+    [100, chromeBand(UI_BG, UI_INK, 12)], // wide enough not to bridge
+    [400, picture(71, 13)], // fragment one
+    [50, chromeBand(UI_BG, UI_INK, 10)], // gap, bridges
+    [70, picture(29, 47)], // fragment two
+    [50, chromeBand(UI_BG, UI_INK, 10)], // gap, bridges
+    [100, picture(83, 19)], // fragment three
+    [300, chromeBand(UI_BG, UI_INK, 12)],
+  ]);
+  const r = detectChrome(img);
+  assert.equal(r.top, 300, `top=${r.top}: cropped to the fragmented region, not the solid one`);
+  assert.equal(r.crop.height, 600, `height=${r.crop.height}: expected the 600-row block`);
+});
+
 test("a captioned meme is not split at its caption bar", () => {
   // The mirror image: a flat, inked strip lying across the middle of the
   // picture. Left alone it splits the picture in two and the crop keeps
