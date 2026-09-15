@@ -89,9 +89,12 @@ export async function decodeAll(files) {
         // and crash the detector on its first pixel read. Try it — it needs no
         // browser — and hand the rest to Chromium, which reads every PNG the
         // app itself can.
+        // Read outside the catch below: a file that cannot be read is that
+        // file's error, not a job for the browser.
+        const bytes = readFileSync(file);
         let png = null;
         try {
-          png = decodePng(readFileSync(file));
+          png = decodePng(bytes);
         } catch {
           png = null;
         }
