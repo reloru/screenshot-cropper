@@ -37,6 +37,7 @@ const require = createRequire(import.meta.url);
 
 const HEIC = new Set([".heic", ".heif"]);
 const MIME = {
+  ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
@@ -82,8 +83,24 @@ export async function decodeAll(files) {
   for (const file of files) {
     const ext = extname(file).toLowerCase();
     try {
-      if (ext === ".png") out.push({ file, ...decodePng(readFileSync(file)) });
-      else if (HEIC.has(ext)) out.push({ file, ...(await decodeHeic(file)) });
+      if (ext === ".png") {
+        // The in-repo codec covers 8-bit RGBA only and returns a null buffer
+        // for anything else, so a 16-bit screenshot used to sail through here
+        // and crash the detector on its first pixel read. Try it — it needs no
+        // browser — and hand the rest to Chromium, which reads every PNG the
+        // app itself can.
+        // Read outside the catch below: a file that cannot be read is that
+        // file's error, not a job for the browser.
+        const bytes = readFileSync(file);
+        let png = null;
+        try {
+          png = decodePng(bytes);
+        } catch {
+          png = null;
+        }
+        if (png && png.data) out.push({ file, ...png });
+        else viaBrowser.push(file);
+      } else if (HEIC.has(ext)) out.push({ file, ...(await decodeHeic(file)) });
       else if (MIME[ext]) viaBrowser.push(file);
       else out.push({ file, error: `unsupported extension ${ext || "(none)"}` });
     } catch (e) {
@@ -109,14 +126,25 @@ export async function decodeAll(files) {
               const canvas = new OffscreenCanvas(bmp.width, bmp.height);
               const ctx = canvas.getContext("2d", { willReadFrequently: true });
               ctx.drawImage(bmp, 0, 0);
-              const d = ctx.getImageData(0, 0, bmp.width, bmp.height);
-              // Structured clone cannot carry a Uint8ClampedArray out of the
-              // page, so it crosses as a plain array and is rewrapped below.
-              return { width: bmp.width, height: bmp.height, data: Array.from(d.data) };
+              // Hand back a re-encoded PNG, not the pixels. A phone screenshot
+              // is 1290x2796, so its ImageData is 14.4 million bytes, and
+              // crossing that as a plain array (structured clone cannot carry a
+              // Uint8ClampedArray) stalls for minutes per image. Canvas always
+              // writes 8-bit RGBA, which the in-repo codec reads, so this trip
+              // costs a compress/inflate and moves a couple of megabytes.
+              const out = await canvas.convertToBlob({ type: "image/png" });
+              const buf = new Uint8Array(await out.arrayBuffer());
+              let s = "";
+              for (let i = 0; i < buf.length; i += 0x8000) {
+                s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+              }
+              return { width: bmp.width, height: bmp.height, png: btoa(s) };
             },
             [b64, mime],
           );
-          out.push({ file, width: r.width, height: r.height, data: new Uint8ClampedArray(r.data) });
+          const png = decodePng(Buffer.from(r.png, "base64"));
+          if (!png.data) throw new Error("canvas returned a PNG the codec could not read");
+          out.push({ file, width: png.width, height: png.height, data: png.data });
         } catch (e) {
           out.push({ file, error: e.message });
         }
